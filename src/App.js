@@ -82,25 +82,41 @@ function Logo() {
 }
 
 // ---------- FITTER LOGIN ----------
-function FitterLogin({ onLogin }) {
+function FitterLogin({ fittersList, onLogin }) {
   const [name, setName] = useState("");
   const [error, setError] = useState("");
+  const sorted = [...(fittersList || [])].sort((a, b) => a.localeCompare(b));
+
   const handle = async () => {
-    if (!name.trim()) { setError("Please enter your name."); return; }
-    await saveStr("finefit_fitter_name", name.trim());
-    onLogin(name.trim());
+    if (!name) { setError("Please select your name."); return; }
+    await onLogin(name);
   };
+
+  if (sorted.length === 0) {
+    return (
+      <div style={{ textAlign: "center", padding: "48px 20px" }}>
+        <div style={{ fontSize: 36, marginBottom: 12 }}>👋</div>
+        <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 22, marginBottom: 8, color: "#1a1a1a" }}>Welcome</h2>
+        <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "#888" }}>
+          No fitters have been set up yet.<br />Please ask Tom to add you to the list in the Admin panel.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div>
       <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 24, marginBottom: 6, color: "#1a1a1a" }}>Welcome</h2>
-      <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888", marginBottom: 28 }}>Enter your name to get started. We'll remember it on this device.</p>
+      <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888", marginBottom: 28 }}>Select your name from the list to get started. We'll remember you on this device.</p>
       <label style={labelStyle}>Your Name</label>
-      <input value={name} onChange={e => { setName(e.target.value); setError(""); }}
-        onKeyDown={e => e.key === "Enter" && handle()}
-        placeholder="e.g. James Hargreaves"
-        style={{ ...inputStyle, borderColor: error ? "#c0392b" : undefined }} autoFocus />
+      <select value={name} onChange={e => { setName(e.target.value); setError(""); }}
+        style={{ ...selectStyle, borderColor: error ? "#c0392b" : undefined }} autoFocus>
+        <option value="">— Select your name —</option>
+        {sorted.map(f => <option key={f} value={f}>{f}</option>)}
+      </select>
       {error && <p style={{ color: "#c0392b", fontFamily: "'DM Mono', monospace", fontSize: 12, marginTop: 8 }}>{error}</p>}
       <button onClick={handle} style={{ ...btnStyle, marginTop: 20, width: "100%" }}>Continue</button>
+      <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#bbb", marginTop: 16, textAlign: "center" }}>Name not listed? Ask Tom to add you.</p>
     </div>
   );
 }
@@ -109,10 +125,28 @@ function FitterLogin({ onLogin }) {
 function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, lockedWeeks, onDeleteRecord, onUpdateRecord }) {
   const emptyEntry = () => ({ day: "Monday", siteId: "", hours: "", tasks: [], expenses: [] });
   const emptyExpense = () => ({ description: "", amount: "", receipt: null });
-  const [entries, setEntries] = useState([emptyEntry()]);
+  const draftKey = `finefit_draft_${fitterName}`;
+
+  // Restore any saved draft for this fitter on this device
+  const [entries, setEntries] = useState(() => {
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (raw) { const d = JSON.parse(raw); if (Array.isArray(d) && d.length) return d; }
+    } catch {}
+    return [emptyEntry()];
+  });
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState("");
+  const [confirmData, setConfirmData] = useState(null); // holds { record, warnings } when confirming
   const fileRefs = useRef({});
+
+  // Auto-save draft whenever entries change (skip once submitted)
+  useEffect(() => {
+    if (submitted) return;
+    try { localStorage.setItem(draftKey, JSON.stringify(entries)); } catch {}
+  }, [entries, submitted, draftKey]);
+
+  const clearDraft = () => { try { localStorage.removeItem(draftKey); } catch {} };
 
   const updateEntry = (i, field, value) => {
     const updated = [...entries];
@@ -150,7 +184,17 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
   const addEntry = () => setEntries([...entries, emptyEntry()]);
   const removeEntry = (i) => setEntries(entries.filter((_, idx) => idx !== i));
 
-  const handleSubmit = async () => {
+  // Hours already submitted by this fitter this week (for running total)
+  const thisWeekKey = getWeekKey();
+  const alreadyThisWeek = (allEntries || [])
+    .filter(r => r.fitter === fitterName && r.weekKey === thisWeekKey)
+    .flatMap(r => r.entries);
+  const submittedHours = alreadyThisWeek.reduce((a, e) => a + (e.hours || 0), 0);
+  const draftHours = entries.reduce((a, e) => a + (parseFloat(e.hours) || 0), 0);
+  const runningTotal = submittedHours + draftHours;
+
+  // Build the record + collect any soft warnings, then show confirmation
+  const buildAndConfirm = () => {
     setError("");
     for (const e of entries) {
       if (!e.siteId) { setError("Please select a site for each entry."); return; }
@@ -164,6 +208,44 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
     }
     const site = (id) => sites.find(s => s.id === id);
     const taskLabel = (id) => tasks.find(t => t.id === id)?.name || id;
+
+    const builtEntries = entries.map(e => ({
+      day: e.day,
+      siteId: e.siteId,
+      siteName: site(e.siteId)?.name || e.siteId,
+      client: site(e.siteId)?.client || "",
+      hours: parseFloat(e.hours),
+      tasks: e.tasks.map(id => ({ id, label: taskLabel(id) })),
+      expenses: (e.expenses || []).map(exp => ({ description: exp.description.trim(), amount: parseFloat(exp.amount), receipt: exp.receipt || null }))
+    }));
+
+    // ---- Soft warnings ----
+    const warnings = [];
+
+    // Duplicate day+site already submitted this week
+    alreadyThisWeek.forEach(prev => {
+      builtEntries.forEach(ne => {
+        if (prev.day === ne.day && prev.siteName === ne.siteName) {
+          warnings.push(`You already submitted ${ne.day} at ${ne.siteName} this week — this would be a second entry.`);
+        }
+      });
+    });
+
+    // Duplicate day+site within this same form
+    builtEntries.forEach((a, ai) => builtEntries.forEach((b, bi) => {
+      if (ai < bi && a.day === b.day && a.siteId === b.siteId) {
+        warnings.push(`You've entered ${a.day} at ${a.siteName} twice in this submission.`);
+      }
+    }));
+
+    // High single-day hours
+    builtEntries.forEach(ne => {
+      if (ne.hours > 12) warnings.push(`${ne.day}: ${ne.hours} hours is a long day — please check it's right.`);
+    });
+
+    // High weekly total
+    if (runningTotal > 60) warnings.push(`Your total for the week would be ${runningTotal.toFixed(1)} hours — please check that's correct.`);
+
     const record = {
       id: Date.now(),
       fitter: fitterName,
@@ -171,21 +253,15 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
       weekKey: getWeekKey(),
       weekLabel: getCurrentWeekLabel(),
       submittedAt: new Date().toISOString(),
-      entries: entries.map(e => ({
-        day: e.day,
-        siteId: e.siteId,
-        siteName: site(e.siteId)?.name || e.siteId,
-        client: site(e.siteId)?.client || "",
-        hours: parseFloat(e.hours),
-        tasks: e.tasks.map(id => ({ id, label: taskLabel(id) })),
-        expenses: (e.expenses || []).map(exp => ({
-          description: exp.description.trim(),
-          amount: parseFloat(exp.amount),
-          receipt: exp.receipt || null
-        }))
-      }))
+      entries: builtEntries
     };
-    await onSubmit(record);
+    setConfirmData({ record, warnings: [...new Set(warnings)] });
+  };
+
+  const confirmSubmit = async () => {
+    await onSubmit(confirmData.record);
+    clearDraft();
+    setConfirmData(null);
     setSubmitted(true);
   };
 
@@ -208,6 +284,53 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
         <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 26, marginBottom: 8, color: "#1a1a1a" }}>Submitted!</h2>
         <p style={{ color: "#666", fontFamily: "'DM Mono', monospace", fontSize: 13 }}>Hours and expenses logged. Thanks {fitterName}.</p>
         <button onClick={() => { setSubmitted(false); setEntries([emptyEntry()]); }} style={btnStyle}>Submit more</button>
+      </div>
+    );
+  }
+
+  // Confirmation summary screen
+  if (confirmData) {
+    const { record, warnings } = confirmData;
+    const recTotal = record.entries.reduce((a, e) => a + (e.hours || 0), 0);
+    const expTotalAll = record.entries.flatMap(e => e.expenses || []).reduce((a, x) => a + (x.amount || 0), 0);
+    return (
+      <div>
+        <h2 style={{ fontFamily: "'Playfair Display', serif", fontSize: 22, marginBottom: 4, color: "#1a1a1a" }}>Check before submitting</h2>
+        <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888", marginBottom: 20 }}>Have a quick look — is everything right, {fitterName}?</p>
+
+        {warnings.length > 0 && (
+          <div style={{ background: "#fff8e8", border: "1px solid #f39c12", borderRadius: 10, padding: 14, marginBottom: 16 }}>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#b7860b", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>⚠️ Please double-check</div>
+            {warnings.map((w, i) => (
+              <p key={i} style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#8a6d3b", margin: "4px 0" }}>• {w}</p>
+            ))}
+          </div>
+        )}
+
+        <div style={{ border: "1px solid #e8e4de", borderRadius: 10, overflow: "hidden", marginBottom: 16 }}>
+          {record.entries.map((e, i) => (
+            <div key={i} style={{ padding: "12px 14px", borderBottom: "1px solid #f5f2ed" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "#1a1a1a", fontWeight: 500 }}>{e.day}</span>
+                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "#C8A96E", fontWeight: 700 }}>{e.hours} hrs</span>
+              </div>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#555" }}>{e.siteName} <span style={{ color: "#aaa" }}>·</span> {e.client}</div>
+              {e.tasks.length > 0 && <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888", marginTop: 4 }}>{e.tasks.map(t => t.label).join(", ")}</div>}
+              {(e.expenses || []).length > 0 && e.expenses.map((x, xi) => (
+                <div key={xi} style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888", marginTop: 2 }}>💰 {x.description} — £{(x.amount || 0).toFixed(2)}</div>
+              ))}
+            </div>
+          ))}
+          <div style={{ padding: "10px 14px", background: "#1a1a1a", display: "flex", justifyContent: "space-between" }}>
+            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#fff" }}>Total{expTotalAll > 0 ? " (+ £" + expTotalAll.toFixed(2) + " expenses)" : ""}</span>
+            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 14, color: "#C8A96E", fontWeight: 700 }}>{recTotal.toFixed(1)} hrs</span>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <button onClick={() => setConfirmData(null)} style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, background: "none", border: "1px solid #e0dbd4", borderRadius: 8, padding: "12px", cursor: "pointer", color: "#888" }}>Go back &amp; edit</button>
+          <button onClick={confirmSubmit} style={{ ...btnStyle, marginTop: 0 }}>Confirm &amp; submit</button>
+        </div>
       </div>
     );
   }
@@ -323,8 +446,20 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
       </div>
 
       <button onClick={addEntry} style={{ ...addRowBtn, marginTop: 12, display: "block" }}>+ Add another day</button>
+
+      {/* Running weekly total */}
+      <div style={{ marginTop: 20, display: "flex", justifyContent: "space-between", alignItems: "center", background: "#faf6ef", border: "1px solid #e8e4de", borderRadius: 8, padding: "10px 14px" }}>
+        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888", textTransform: "uppercase", letterSpacing: "0.08em" }}>This week so far</span>
+        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 15, color: "#C8A96E", fontWeight: 700 }}>{runningTotal.toFixed(1)} hrs</span>
+      </div>
+      {submittedHours > 0 && (
+        <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "#aaa", marginTop: 6, marginBottom: 0, textAlign: "right" }}>
+          {submittedHours.toFixed(1)} already submitted + {draftHours.toFixed(1)} below
+        </p>
+      )}
+
       {error && <p style={{ color: "#c0392b", fontFamily: "'DM Mono', monospace", fontSize: 12, marginTop: 16 }}>{error}</p>}
-      <button onClick={handleSubmit} style={{ ...btnStyle, marginTop: 20, width: "100%" }}>Submit Hours & Expenses</button>
+      <button onClick={buildAndConfirm} style={{ ...btnStyle, marginTop: 16, width: "100%" }}>Review & Submit</button>
 
       <MyWeekSubmissions
         fitterName={fitterName}
@@ -343,13 +478,20 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
 function MyWeekSubmissions({ fitterName, allEntries, lockedWeeks, sites, tasks, onDeleteRecord, onUpdateRecord }) {
   const [editingId, setEditingId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [showHistory, setShowHistory] = useState(false);
   const thisWeek = getWeekKey();
   const locked = lockedWeeks.includes(thisWeek);
 
-  // Only this device's own submissions for the current week
-  const mine = allEntries.filter(r => r.deviceId === DEVICE_ID && r.weekKey === thisWeek);
+  // Match by name so it works across devices and cache clears
+  const allMine = allEntries.filter(r => r.fitter === fitterName);
+  const mine = allMine.filter(r => r.weekKey === thisWeek);
+  const past = allMine.filter(r => r.weekKey !== thisWeek).sort((a, b) => b.weekKey.localeCompare(a.weekKey));
 
-  if (mine.length === 0) return null;
+  if (allMine.length === 0) return null;
+
+  // Group past records by week for the read-only history
+  const pastByWeek = {};
+  past.forEach(r => { if (!pastByWeek[r.weekKey]) pastByWeek[r.weekKey] = { label: r.weekLabel, records: [] }; pastByWeek[r.weekKey].records.push(r); });
 
   return (
     <div style={{ marginTop: 32, borderTop: "1px solid #e8e4de", paddingTop: 24 }}>
@@ -357,7 +499,7 @@ function MyWeekSubmissions({ fitterName, allEntries, lockedWeeks, sites, tasks, 
         <h3 style={{ fontFamily: "'Playfair Display', serif", fontSize: 18, color: "#1a1a1a", margin: 0 }}>My submissions this week</h3>
       </div>
       <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888", marginTop: 4, marginBottom: 16 }}>
-        {locked ? "This week has been invoiced and can no longer be changed. Speak to Tom if something's wrong." : "You can fix or remove anything you submitted this week, until Tom invoices it."}
+        {mine.length === 0 ? "You haven't submitted anything this week yet." : locked ? "This week has been invoiced and can no longer be changed. Speak to Tom if something's wrong." : "You can fix or remove anything you submitted this week, until Tom invoices it."}
       </p>
 
       {mine.map(record => (
@@ -402,6 +544,39 @@ function MyWeekSubmissions({ fitterName, allEntries, lockedWeeks, sites, tasks, 
           </div>
         )
       ))}
+
+      {/* Read-only past history */}
+      {Object.keys(pastByWeek).length > 0 && (
+        <div style={{ marginTop: 20 }}>
+          <button onClick={() => setShowHistory(h => !h)} style={{ width: "100%", fontFamily: "'DM Mono', monospace", fontSize: 12, background: "none", border: "1px solid #e0dbd4", borderRadius: 8, padding: "10px 14px", cursor: "pointer", color: "#888", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>{showHistory ? "▲ Hide" : "▼ Show"} my past weeks ({Object.keys(pastByWeek).length})</span>
+            <span style={{ color: "#bbb" }}>read-only</span>
+          </button>
+          {showHistory && (
+            <div style={{ marginTop: 12 }}>
+              {Object.entries(pastByWeek).map(([wk, data]) => {
+                const weekHours = data.records.flatMap(r => r.entries).reduce((a, e) => a + (e.hours || 0), 0);
+                return (
+                  <div key={wk} style={{ marginBottom: 12, border: "1px solid #e8e4de", borderRadius: 10, overflow: "hidden" }}>
+                    <div style={{ padding: "9px 14px", background: "#fafaf8", borderBottom: "1px solid #e8e4de", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888" }}>{data.label}</span>
+                      <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#C8A96E", fontWeight: 700 }}>{weekHours.toFixed(1)} hrs</span>
+                    </div>
+                    {data.records.flatMap(r => r.entries.map((entry, i) => (
+                      <div key={`${r.id}-${i}`} style={{ padding: "8px 14px", borderBottom: "1px solid #f5f2ed", display: "grid", gridTemplateColumns: "70px 1fr 1fr 45px", gap: 8 }}>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#aaa" }}>{entry.day?.slice(0,3)}</span>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#555" }}>{entry.siteName}</span>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#C8A96E" }}>{entry.client}</span>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#1a1a1a", textAlign: "right" }}>{entry.hours}h</span>
+                      </div>
+                    )))}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -426,7 +601,7 @@ function AdminLogin({ onLogin }) {
 }
 
 // ---------- ADMIN DASHBOARD ----------
-function AdminDashboard({ allEntries, sites, tasks, rates, lockedWeeks, onSitesChange, onTasksChange, onRatesChange, onDeleteRecord, onUpdateRecord, onToggleLock, onLogout }) {
+function AdminDashboard({ allEntries, sites, tasks, rates, lockedWeeks, fittersList, onSitesChange, onTasksChange, onRatesChange, onDeleteRecord, onUpdateRecord, onToggleLock, onFittersChange, onLogout }) {
   const [tab, setTab] = useState("submissions");
   return (
     <div>
@@ -435,7 +610,7 @@ function AdminDashboard({ allEntries, sites, tasks, rates, lockedWeeks, onSitesC
         <button onClick={onLogout} style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, background: "none", border: "1px solid #ddd", borderRadius: 6, padding: "6px 12px", cursor: "pointer", color: "#888" }}>Log out</button>
       </div>
       <div style={{ display: "flex", gap: 4, marginBottom: 24, background: "#f5f2ed", borderRadius: 8, padding: 4 }}>
-        {[["submissions", "Timesheets"], ["report", "Invoices"], ["rates", "Rates"], ["sites", "Sites"], ["tasks", "Tasks"]].map(([key, label]) => (
+        {[["submissions", "Timesheets"], ["report", "Invoices"], ["rates", "Rates"], ["fitters", "Fitters"], ["sites", "Sites"], ["tasks", "Tasks"]].map(([key, label]) => (
           <button key={key} onClick={() => setTab(key)} style={{
             flex: 1, fontFamily: "'DM Mono', monospace", fontSize: 11, padding: "8px 0",
             border: "none", borderRadius: 6, cursor: "pointer",
@@ -447,8 +622,74 @@ function AdminDashboard({ allEntries, sites, tasks, rates, lockedWeeks, onSitesC
       {tab === "submissions" && <SubmissionsTab allEntries={allEntries} sites={sites} tasks={tasks} lockedWeeks={lockedWeeks} onDeleteRecord={onDeleteRecord} onUpdateRecord={onUpdateRecord} />}
       {tab === "report" && <InvoicesTab allEntries={allEntries} rates={rates} lockedWeeks={lockedWeeks} onToggleLock={onToggleLock} />}
       {tab === "rates" && <RatesTab allEntries={allEntries} rates={rates} onRatesChange={onRatesChange} />}
+      {tab === "fitters" && <FittersTab fittersList={fittersList} allEntries={allEntries} onFittersChange={onFittersChange} />}
       {tab === "sites" && <SitesTab sites={sites} onSitesChange={onSitesChange} />}
       {tab === "tasks" && <TasksTab tasks={tasks} onTasksChange={onTasksChange} />}
+    </div>
+  );
+}
+
+// ---------- FITTERS TAB ----------
+function FittersTab({ fittersList, allEntries, onFittersChange }) {
+  const [newName, setNewName] = useState("");
+  const [error, setError] = useState("");
+
+  const list = [...(fittersList || [])].sort((a, b) => a.localeCompare(b));
+  // Names that appear in submissions but aren't on the list (e.g. from before this feature)
+  const submittedNames = [...new Set(allEntries.map(e => e.fitter).filter(Boolean))];
+  const unlisted = submittedNames.filter(n => !(fittersList || []).includes(n)).sort((a, b) => a.localeCompare(b));
+
+  const addFitter = async (name) => {
+    const n = (name || "").trim();
+    if (!n) { setError("Enter a name."); return; }
+    if ((fittersList || []).some(f => f.toLowerCase() === n.toLowerCase())) { setError("That name is already on the list."); return; }
+    await onFittersChange([...(fittersList || []), n]);
+    setNewName(""); setError("");
+  };
+  const removeFitter = async (name) => {
+    await onFittersChange((fittersList || []).filter(f => f !== name));
+  };
+
+  return (
+    <div>
+      <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888", marginBottom: 20 }}>
+        Add each fitter here. They'll pick their name from this list when they open the app, so there are no typos and their hours always stay under one name.
+      </p>
+
+      <div style={{ background: "#f5f2ed", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 12 }}>Add Fitter</div>
+        <label style={labelStyle}>Full Name</label>
+        <input value={newName} onChange={e => { setNewName(e.target.value); setError(""); }}
+          onKeyDown={e => e.key === "Enter" && addFitter(newName)}
+          placeholder="e.g. Daniel Frost" style={inputStyle} />
+        {error && <p style={{ color: "#c0392b", fontFamily: "'DM Mono', monospace", fontSize: 12, marginTop: 8, marginBottom: 0 }}>{error}</p>}
+        <button onClick={() => addFitter(newName)} style={{ ...btnStyle, marginTop: 12, padding: "10px 18px" }}>+ Add Fitter</button>
+      </div>
+
+      {unlisted.length > 0 && (
+        <div style={{ background: "#fff8e8", border: "1px solid #f39c12", borderRadius: 10, padding: 14, marginBottom: 20 }}>
+          <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#b7860b", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>Names already in timesheets, not on the list</div>
+          <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#8a6d3b", marginTop: 0, marginBottom: 12 }}>These names have submitted before. Tap to add them to the list so they can log in and keep their history.</p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {unlisted.map(n => (
+              <button key={n} onClick={() => addFitter(n)} style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, background: "#fff", border: "1px solid #f39c12", borderRadius: 20, padding: "6px 12px", cursor: "pointer", color: "#b7860b" }}>+ {n}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {list.length === 0 ? (
+        <p style={{ textAlign: "center", fontFamily: "'DM Mono', monospace", fontSize: 13, color: "#bbb", padding: "24px 0" }}>No fitters added yet.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {list.map(f => (
+            <div key={f} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", border: "1px solid #e8e4de", borderRadius: 8, background: "#fff" }}>
+              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "#1a1a1a" }}>{f}</span>
+              <button onClick={() => removeFitter(f)} style={{ background: "none", border: "1px solid #eee", borderRadius: 6, padding: "4px 10px", fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#aaa", cursor: "pointer" }}>Remove</button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1234,20 +1475,22 @@ export default function App() {
   const [tasks, setTasks] = useState([]);
   const [rates, setRates] = useState({});
   const [lockedWeeks, setLockedWeeks] = useState([]);
+  const [fittersList, setFittersList] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     Promise.all([
       load("finefit_entries"), loadStr("finefit_fitter_name"),
       load("finefit_sites"), load("finefit_tasks"), load("finefit_rates"),
-      load("finefit_locked_weeks"),
-    ]).then(([entries, name, savedSites, savedTasks, savedRates, savedLocks]) => {
+      load("finefit_locked_weeks"), load("finefit_fitters"),
+    ]).then(([entries, name, savedSites, savedTasks, savedRates, savedLocks, savedFitters]) => {
       setAllEntries(entries || []);
       if (name) setFitterName(name);
       setSites(savedSites || []);
       setTasks(savedTasks || []);
       setRates(savedRates || {});
       setLockedWeeks(savedLocks || []);
+      setFittersList(savedFitters || []);
       setLoading(false);
     });
   }, []);
@@ -1263,6 +1506,7 @@ export default function App() {
     const u = lockedWeeks.includes(weekKey) ? lockedWeeks.filter(w => w !== weekKey) : [...lockedWeeks, weekKey];
     setLockedWeeks(u); await save("finefit_locked_weeks", u);
   };
+  const handleFittersChange = async (u) => { setFittersList(u); await save("finefit_fitters", u); };
   const isFitter = view === "fitter";
 
   return (
@@ -1283,13 +1527,13 @@ export default function App() {
             fitterName
               ? <FitterForm fitterName={fitterName} onLogout={handleFitterLogout} onSubmit={handleSubmit} sites={sites} tasks={tasks}
                   allEntries={allEntries} lockedWeeks={lockedWeeks} onDeleteRecord={handleDeleteRecord} onUpdateRecord={handleUpdateRecord} />
-              : <FitterLogin onLogin={setFitterName} />
+              : <FitterLogin fittersList={fittersList} onLogin={async (n) => { await saveStr("finefit_fitter_name", n); setFitterName(n); }} />
           ) : view === "adminLogin" ? (
             <AdminLogin onLogin={() => setView("admin")} />
           ) : (
             <AdminDashboard allEntries={allEntries} sites={sites} tasks={tasks} rates={rates}
-              lockedWeeks={lockedWeeks} onSitesChange={handleSitesChange} onTasksChange={handleTasksChange}
-              onRatesChange={handleRatesChange} onDeleteRecord={handleDeleteRecord}
+              lockedWeeks={lockedWeeks} fittersList={fittersList} onSitesChange={handleSitesChange} onTasksChange={handleTasksChange}
+              onRatesChange={handleRatesChange} onDeleteRecord={handleDeleteRecord} onFittersChange={handleFittersChange}
               onUpdateRecord={handleUpdateRecord} onToggleLock={handleToggleLock} onLogout={() => setView("fitter")} />
           )}
         </div>
