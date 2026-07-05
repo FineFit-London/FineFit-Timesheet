@@ -898,7 +898,7 @@ function AdminDashboard({ allEntries, sites, tasks, rates, lockedWeeks, fittersL
       </div>
       {tab === "submissions" && <SubmissionsTab allEntries={allEntries} sites={sites} tasks={tasks} lockedWeeks={lockedWeeks} fittersList={fittersList} onDeleteRecord={onDeleteRecord} onUpdateRecord={onUpdateRecord} />}
       {tab === "report" && <InvoicesTab allEntries={allEntries} rates={rates} lockedWeeks={lockedWeeks} onToggleLock={onToggleLock} />}
-      {tab === "rates" && <RatesTab allEntries={allEntries} rates={rates} onRatesChange={onRatesChange} />}
+      {tab === "rates" && <RatesTab allEntries={allEntries} rates={rates} fittersList={fittersList} sites={sites} onRatesChange={onRatesChange} />}
       {tab === "fitters" && <FittersTab fittersList={fittersList} allEntries={allEntries} pins={pins} onFittersChange={onFittersChange} onResetPin={onResetPin} />}
       {tab === "sites" && <SitesTab sites={sites} onSitesChange={onSitesChange} />}
       {tab === "tasks" && <TasksTab tasks={tasks} onTasksChange={onTasksChange} />}
@@ -982,19 +982,34 @@ function FittersTab({ fittersList, allEntries, pins, onFittersChange, onResetPin
 }
 
 // ---------- RATES TAB ----------
-function RatesTab({ allEntries, rates, onRatesChange }) {
-  // Build unique fitter+site pairs from all submissions
-  const pairs = [];
-  const seen = new Set();
-  allEntries.forEach(record => {
-    record.entries.forEach(en => {
-      const key = `${record.fitter}|||${en.siteName}`;
-      if (!seen.has(key)) { seen.add(key); pairs.push({ fitter: record.fitter, site: en.siteName }); }
-    });
-  });
-
+function RatesTab({ allEntries, rates, fittersList, sites, onRatesChange }) {
   const [edits, setEdits] = useState({});
   const [saved, setSaved] = useState(false);
+  const [addFitter, setAddFitter] = useState("");
+  const [addSite, setAddSite] = useState("");
+  const [manualPairs, setManualPairs] = useState([]); // pairs added this session via picker
+  const [pickError, setPickError] = useState("");
+
+  // Pairs from submissions
+  const pairs = [];
+  const seen = new Set();
+  const addPair = (fitter, site) => {
+    const key = `${fitter}|||${site}`;
+    if (!seen.has(key)) { seen.add(key); pairs.push({ fitter, site }); }
+  };
+  allEntries.forEach(record => {
+    record.entries.forEach(en => addPair(record.fitter, en.siteName));
+  });
+  // Pairs that already have a saved rate (so pre-set ones persist after refresh)
+  Object.keys(rates || {}).forEach(key => {
+    const [fitter, site] = key.split("|||");
+    if (fitter && site) addPair(fitter, site);
+  });
+  // Pairs added this session via the picker
+  manualPairs.forEach(({ fitter, site }) => addPair(fitter, site));
+
+  // Sort for a tidy table
+  pairs.sort((a, b) => a.fitter.localeCompare(b.fitter) || a.site.localeCompare(b.site));
 
   const getClientRate = (fitter, site) => {
     const key = `${fitter}|||${site}`;
@@ -1025,14 +1040,55 @@ function RatesTab({ allEntries, rates, onRatesChange }) {
     setTimeout(() => setSaved(false), 2000);
   };
 
+  const addManualPair = () => {
+    setPickError("");
+    if (!addFitter || !addSite) { setPickError("Pick both a fitter and a site."); return; }
+    const key = `${addFitter}|||${addSite}`;
+    if (seen.has(key)) { setPickError("That fitter + site already has a row below."); return; }
+    setManualPairs(prev => [...prev, { fitter: addFitter, site: addSite }]);
+    setAddFitter(""); setAddSite("");
+  };
+
+  const fitterOptions = [...(fittersList || [])].sort((a, b) => a.localeCompare(b));
+  const siteOptions = [...(sites || [])].sort((a, b) => a.name.localeCompare(b.name));
+
   return (
     <div>
-      <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888", marginBottom: 20 }}>
-        Set two rates per fitter per site: what you charge the client, and what you pay the fitter.
+      <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888", marginBottom: 16 }}>
+        Set two rates per fitter per site: what you charge the client, and what you pay the fitter. You can set these up front — before a fitter has logged any hours.
       </p>
+
+      {/* Add / pre-set a rate row */}
+      <div style={{ background: "#f5f2ed", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 12 }}>Add a rate</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 10, alignItems: "end" }}>
+          <div>
+            <label style={labelStyle}>Fitter</label>
+            <select value={addFitter} onChange={e => { setAddFitter(e.target.value); setPickError(""); }} style={selectStyle}>
+              <option value="">— Select —</option>
+              {fitterOptions.map(f => <option key={f} value={f}>{f}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={labelStyle}>Site</label>
+            <select value={addSite} onChange={e => { setAddSite(e.target.value); setPickError(""); }} style={selectStyle}>
+              <option value="">— Select —</option>
+              {siteOptions.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+            </select>
+          </div>
+          <button onClick={addManualPair} style={{ ...btnStyle, marginTop: 0, padding: "10px 16px", whiteSpace: "nowrap" }}>+ Add</button>
+        </div>
+        {pickError && <p style={{ color: "#c0392b", fontFamily: "'DM Mono', monospace", fontSize: 12, marginTop: 8, marginBottom: 0 }}>{pickError}</p>}
+        {(fitterOptions.length === 0 || siteOptions.length === 0) && (
+          <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#b7860b", marginTop: 8, marginBottom: 0 }}>
+            {fitterOptions.length === 0 ? "Add fitters in the Fitters tab first. " : ""}{siteOptions.length === 0 ? "Add sites in the Sites tab first." : ""}
+          </p>
+        )}
+      </div>
+
       {pairs.length === 0 ? (
-        <p style={{ textAlign: "center", fontFamily: "'DM Mono', monospace", fontSize: 13, color: "#bbb", padding: "32px 0" }}>
-          Rates appear here once fitters start submitting hours.
+        <p style={{ textAlign: "center", fontFamily: "'DM Mono', monospace", fontSize: 13, color: "#bbb", padding: "24px 0" }}>
+          No rates yet. Use “Add a rate” above to set one up.
         </p>
       ) : (
         <>
