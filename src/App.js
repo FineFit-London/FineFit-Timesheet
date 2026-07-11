@@ -15,6 +15,15 @@ const FORTNIGHT_ANCHOR = new Date(2026, 6, 6); // months are 0-indexed: 6 = July
 FORTNIGHT_ANCHOR.setHours(0, 0, 0, 0);
 const FORTNIGHT_MS = 14 * 24 * 60 * 60 * 1000;
 
+// Build a YYYY-MM-DD key from LOCAL date parts (never UTC), so British Summer Time
+// doesn't shift dates back a day. Using toISOString() here was the bug.
+function dateKey(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 function getPeriodStart(date = new Date()) {
   const d = new Date(date);
   d.setHours(0, 0, 0, 0);
@@ -31,11 +40,11 @@ function getCurrentWeekLabel() {
   end.setDate(end.getDate() + 13);
   return `${formatDate(start)} – ${formatDate(end)}`;
 }
-function getWeekKey() { return getPeriodStart().toISOString().split("T")[0]; }
+function getWeekKey() { return dateKey(getPeriodStart()); }
 function toGBP(n) { return "£" + Number(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
 function weekEndLabel(weekKey) {
   if (!weekKey || weekKey === "all") return "";
-  const start = new Date(weekKey);
+  const start = new Date(weekKey + "T00:00:00");
   const end = new Date(start);
   end.setDate(end.getDate() + 13);
   return end.toLocaleDateString("en-GB");
@@ -101,13 +110,13 @@ function splitOvertime(day, hours, dateIso) {
 
 // The 14 dates of a fortnight, each with its weekday name and a short label
 function getPeriodDays(periodStartKey) {
-  const start = periodStartKey ? new Date(periodStartKey) : getPeriodStart();
+  const start = periodStartKey ? new Date(periodStartKey + "T00:00:00") : getPeriodStart();
   const out = [];
   for (let i = 0; i < 14; i++) {
     const d = new Date(start);
     d.setDate(d.getDate() + i);
     const dayName = d.toLocaleDateString("en-GB", { weekday: "long" });
-    const iso = d.toISOString().split("T")[0];
+    const iso = dateKey(d);
     const bh = isBankHoliday(iso);
     const label = d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }) + (bh ? " — Bank Holiday" : "");
     out.push({ iso, dayName, label, week: i < 7 ? 1 : 2, bankHoliday: bh });
@@ -283,6 +292,7 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
   const [error, setError] = useState("");
   const [confirmData, setConfirmData] = useState(null); // holds { record, warnings } when confirming
   const [confirmedCorrect, setConfirmedCorrect] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const fileRefs = useRef({});
 
   // Flag a restored draft once, on first load
@@ -444,12 +454,20 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
   };
 
   const confirmSubmit = async () => {
-    await onSubmit(confirmData.record);
-    clearDraft();
-    setRestoredDraft(false);
-    setConfirmData(null);
-    setConfirmedCorrect(false);
-    setSubmitted(true);
+    if (submitting) return; // guard against double-tap while the save is in progress
+    setSubmitting(true);
+    try {
+      await onSubmit(confirmData.record);
+      clearDraft();
+      setRestoredDraft(false);
+      setConfirmData(null);
+      setConfirmedCorrect(false);
+      setSubmitted(true);
+    } catch (err) {
+      alert("Sorry — that didn't save. Please check your signal and try again.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   if (sites.length === 0 || tasks.length === 0) {
@@ -520,10 +538,13 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
         </label>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <button onClick={() => { setConfirmData(null); setConfirmedCorrect(false); }} style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, background: "none", border: "1px solid #e0dbd4", borderRadius: 8, padding: "12px", cursor: "pointer", color: "#888" }}>Go back &amp; edit</button>
-          <button onClick={confirmSubmit} disabled={!confirmedCorrect} style={{ ...btnStyle, marginTop: 0, opacity: confirmedCorrect ? 1 : 0.4, cursor: confirmedCorrect ? "pointer" : "not-allowed" }}>Confirm &amp; submit</button>
+          <button onClick={() => { if (!submitting) { setConfirmData(null); setConfirmedCorrect(false); } }} disabled={submitting} style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, background: "none", border: "1px solid #e0dbd4", borderRadius: 8, padding: "12px", cursor: submitting ? "not-allowed" : "pointer", color: "#888", opacity: submitting ? 0.4 : 1 }}>Go back &amp; edit</button>
+          <button onClick={confirmSubmit} disabled={!confirmedCorrect || submitting} style={{ ...btnStyle, marginTop: 0, opacity: (confirmedCorrect && !submitting) ? 1 : 0.5, cursor: (confirmedCorrect && !submitting) ? "pointer" : "not-allowed" }}>
+            {submitting ? "Submitting…" : "Confirm & submit"}
+          </button>
         </div>
-        {!confirmedCorrect && <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#bbb", textAlign: "center", marginTop: 8 }}>Tick the box above to submit.</p>}
+        {submitting && <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#C8A96E", textAlign: "center", marginTop: 8 }}>Saving your hours — please wait, don't tap again.</p>}
+        {!confirmedCorrect && !submitting && <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#bbb", textAlign: "center", marginTop: 8 }}>Tick the box above to submit.</p>}
       </div>
     );
   }
@@ -1232,7 +1253,7 @@ function EarningsTab({ allEntries, rates, sites, noIndigo }) {
 
   // This calendar month
   const now = new Date();
-  const monthRows = rows.filter(r => { const d = new Date(r.period); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); });
+  const monthRows = rows.filter(r => { const d = new Date(r.period + "T00:00:00"); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); });
   const monthProfit = sum(monthRows, "charged") - sum(monthRows, "paid");
 
   // Group helper
@@ -1254,7 +1275,7 @@ function EarningsTab({ allEntries, rates, sites, noIndigo }) {
   const labelFor = (k) => view === "period" ? periodLabel(k) : k;
   function periodLabel(wk) {
     if (!wk) return "—";
-    const start = new Date(wk); const end = new Date(start); end.setDate(end.getDate() + 13);
+    const start = new Date(wk + "T00:00:00"); const end = new Date(start); end.setDate(end.getDate() + 13);
     return `${start.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} – ${end.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`;
   }
 
