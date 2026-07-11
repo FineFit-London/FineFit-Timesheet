@@ -72,6 +72,23 @@ function isBankHoliday(dateIso) {
   return !!dateIso && BANK_HOLIDAYS.has(dateIso);
 }
 
+// Receipts may be an old plain string (image data URL) or a {data,type,name} object.
+function receiptSrc(r) { return !r ? null : (typeof r === "string" ? r : r.data); }
+function receiptIsPdf(r) { return !!r && typeof r === "object" && r.type === "pdf"; }
+function receiptName(r) { return (r && typeof r === "object" && r.name) ? r.name : "receipt"; }
+function openReceipt(r) {
+  const src = receiptSrc(r);
+  if (!src) return;
+  const w = window.open("", "_blank");
+  if (!w) return;
+  if (receiptIsPdf(r)) {
+    w.document.write(`<iframe src="${src}" style="border:0;width:100%;height:100vh"></iframe>`);
+  } else {
+    w.document.write(`<img src="${src}" style="max-width:100%">`);
+  }
+  w.document.close();
+}
+
 // ---------- OVERTIME ----------
 // Splits an entry's hours into normal vs overtime.
 // Overtime = all Sat/Sun hours, all bank-holiday hours, plus weekday hours over 8.5/day.
@@ -305,8 +322,17 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
   };
   const handleReceiptUpload = (i, ei, file) => {
     if (!file) return;
+    // Firestore documents have a ~1MB limit; receipts are stored inline, so cap the file size.
+    const maxBytes = 900 * 1024;
+    if (file.size > maxBytes) {
+      alert("That file is a bit large (over ~0.9MB). Please use a smaller photo or PDF — most phone cameras let you send a smaller size, or you can take a fresh photo.");
+      return;
+    }
     const reader = new FileReader();
-    reader.onload = (e) => updateExpense(i, ei, "receipt", e.target.result);
+    reader.onload = (e) => {
+      const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
+      updateExpense(i, ei, "receipt", { data: e.target.result, type: isPdf ? "pdf" : "image", name: file.name || "receipt" });
+    };
     reader.readAsDataURL(file);
   };
   const removeExpense = (i, ei) => {
@@ -400,7 +426,7 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
     // Expense without a receipt attached
     builtEntries.forEach(ne => {
       (ne.expenses || []).forEach(x => {
-        if (!x.receipt) warnings.push(`${ne.day}: expense "${x.description}" has no receipt photo — add one so Tom can claim it back.`);
+        if (!x.receipt) warnings.push(`${ne.day}: expense "${x.description}" has no receipt attached — add a photo or file so Tom can claim it back.`);
       });
     });
 
@@ -630,16 +656,18 @@ function FitterForm({ fitterName, onLogout, onSubmit, sites, tasks, allEntries, 
                       </div>
                       {/* Receipt upload */}
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <input type="file" accept="image/*" capture="environment"
+                        <input type="file" accept="image/*,application/pdf,.pdf"
                           style={{ display: "none" }}
                           ref={el => { if (!fileRefs.current[`${i}-${ei}`]) fileRefs.current[`${i}-${ei}`] = el; fileRefs.current[`${i}-${ei}`] = el; }}
                           onChange={e => handleReceiptUpload(i, ei, e.target.files[0])} />
                         <button onClick={() => fileRefs.current[`${i}-${ei}`]?.click()}
                           style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, background: "none", border: "1px dashed #e0dbd4", borderRadius: 6, padding: "5px 10px", cursor: "pointer", color: "#888", display: "flex", alignItems: "center", gap: 5 }}>
-                          📷 {exp.receipt ? "Receipt attached ✓" : "Attach receipt"}
+                          📎 {exp.receipt ? "Receipt attached ✓" : "Attach receipt (photo or file)"}
                         </button>
                         {exp.receipt && (
-                          <img src={exp.receipt} alt="receipt" style={{ height: 36, width: 36, objectFit: "cover", borderRadius: 4, border: "1px solid #e0dbd4" }} />
+                          receiptIsPdf(exp.receipt)
+                            ? <span onClick={() => openReceipt(exp.receipt)} title={receiptName(exp.receipt)} style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "#888", border: "1px solid #e0dbd4", borderRadius: 4, padding: "6px 8px", cursor: "pointer" }}>📄 PDF</span>
+                            : <img src={receiptSrc(exp.receipt)} alt="receipt" onClick={() => openReceipt(exp.receipt)} style={{ height: 36, width: 36, objectFit: "cover", borderRadius: 4, border: "1px solid #e0dbd4", cursor: "pointer" }} />
                         )}
                       </div>
                     </div>
@@ -1745,8 +1773,13 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggle
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                 {allExpenses.filter(e => e.receipt).map((exp, i) => (
                   <div key={i} style={{ textAlign: "center" }}>
-                    <img src={exp.receipt} alt={exp.description} style={{ width: 80, height: 80, objectFit: "cover", borderRadius: 8, border: "1px solid #e8e4de", display: "block", cursor: "pointer" }}
-                      onClick={() => window.open(exp.receipt, "_blank")} />
+                    {receiptIsPdf(exp.receipt)
+                      ? <div onClick={() => openReceipt(exp.receipt)} style={{ width: 80, height: 80, borderRadius: 8, border: "1px solid #e8e4de", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", background: "#faf9f7" }}>
+                          <span style={{ fontSize: 22 }}>📄</span>
+                          <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 9, color: "#888" }}>PDF</span>
+                        </div>
+                      : <img src={receiptSrc(exp.receipt)} alt={exp.description} style={{ width: 80, height: 80, objectFit: "cover", borderRadius: 8, border: "1px solid #e8e4de", display: "block", cursor: "pointer" }}
+                          onClick={() => openReceipt(exp.receipt)} />}
                     <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "#aaa", display: "block", marginTop: 4 }}>{exp.description}</span>
                   </div>
                 ))}
@@ -1840,81 +1873,104 @@ function SubmissionsTab({ allEntries, sites, tasks, lockedWeeks, fittersList, on
 
       {filtered.length === 0 ? (
         <div style={{ textAlign: "center", padding: "40px 0", color: "#bbb", fontFamily: "'DM Mono', monospace", fontSize: 13 }}>No submissions match these filters.</div>
-      ) : filtered.map(record => (
-        editingId === record.id ? (
-          <EditSubmission
-            key={record.id}
-            record={record}
-            sites={sites}
-            tasks={tasks}
-            onSave={async (updated) => { await onUpdateRecord(record.id, updated); setEditingId(null); }}
-            onCancel={() => setEditingId(null)}
-          />
-        ) : (
-          <div key={record.id} style={{ marginBottom: 16, border: "1px solid #e8e4de", borderRadius: 10, overflow: "hidden" }}>
-            <div style={{ padding: "10px 14px", background: "#f5f2ed", borderBottom: "1px solid #e8e4de", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <span style={{ fontFamily: "'Playfair Display', serif", fontSize: 15, fontWeight: 600, color: "#1a1a1a" }}>{record.fitter}</span>
-                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "#aaa", marginLeft: 8 }}>{record.weekLabel}</span>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888" }}>
-                  {record.entries.reduce((a, e) => a + (e.hours || 0), 0).toFixed(1)} hrs
-                </span>
-                {(lockedWeeks || []).includes(record.weekKey) ? (
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, background: "#f0ece6", color: "#999", borderRadius: 6, padding: "4px 10px" }}>🔒 Invoiced</span>
-                ) : (
-                  <>
-                    <button onClick={() => setEditingId(record.id)} style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, background: "none", border: "1px solid #e0dbd4", borderRadius: 6, padding: "4px 10px", cursor: "pointer", color: "#888" }}>Edit</button>
-                    <button onClick={() => setConfirmDeleteId(record.id)} style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, background: "none", border: "1px solid #f5c6cb", borderRadius: 6, padding: "4px 10px", cursor: "pointer", color: "#c0392b" }}>Delete</button>
-                  </>
-                )}
-              </div>
-            </div>
+      ) : (() => {
+        // Group filtered submissions by fitter + fortnight so multiple submissions show as one tidy card
+        const groups = {};
+        filtered.forEach(record => {
+          const gkey = `${record.fitter}|||${record.weekKey}`;
+          if (!groups[gkey]) groups[gkey] = { fitter: record.fitter, weekKey: record.weekKey, weekLabel: record.weekLabel, records: [] };
+          groups[gkey].records.push(record);
+        });
+        // Sort groups: newest period first, then fitter name
+        const groupList = Object.values(groups).sort((a, b) => b.weekKey.localeCompare(a.weekKey) || a.fitter.localeCompare(b.fitter));
 
-            {confirmDeleteId === record.id && (
-              <div style={{ padding: "12px 14px", background: "#fff5f5", borderBottom: "1px solid #f5c6cb", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#c0392b" }}>Delete this whole submission? This can't be undone.</span>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => setConfirmDeleteId(null)} style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, background: "none", border: "1px solid #ddd", borderRadius: 6, padding: "5px 12px", cursor: "pointer", color: "#888" }}>Cancel</button>
-                  <button onClick={async () => { await onDeleteRecord(record.id); setConfirmDeleteId(null); }} style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, background: "#c0392b", border: "none", borderRadius: 6, padding: "5px 12px", cursor: "pointer", color: "#fff" }}>Yes, delete</button>
+        return groupList.map(group => {
+          const locked = (lockedWeeks || []).includes(group.weekKey);
+          const groupHours = group.records.flatMap(r => r.entries).reduce((a, e) => a + (e.hours || 0), 0);
+          return (
+            <div key={`${group.fitter}|||${group.weekKey}`} style={{ marginBottom: 16, border: "1px solid #e8e4de", borderRadius: 10, overflow: "hidden" }}>
+              <div style={{ padding: "10px 14px", background: "#f5f2ed", borderBottom: "1px solid #e8e4de", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <span style={{ fontFamily: "'Playfair Display', serif", fontSize: 15, fontWeight: 600, color: "#1a1a1a" }}>{group.fitter}</span>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "#aaa", marginLeft: 8 }}>{group.weekLabel}</span>
+                  {group.records.length > 1 && <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 9, color: "#aaa", marginLeft: 6, background: "#e8e4de", borderRadius: 4, padding: "1px 5px" }}>{group.records.length} submissions</span>}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#1a1a1a", fontWeight: 700 }}>{groupHours.toFixed(1)} hrs</span>
+                  {locked && <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, background: "#f0ece6", color: "#999", borderRadius: 6, padding: "4px 10px" }}>🔒 Invoiced</span>}
                 </div>
               </div>
-            )}
 
-            {record.entries.map((entry, i) => (
-              <div key={i} style={{ padding: "10px 14px", borderBottom: "1px solid #f5f2ed" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "80px 1fr 1fr 50px", gap: 8, marginBottom: (entry.tasks?.length || entry.expenses?.length) ? 6 : 0 }}>
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#aaa" }}>{entry.day?.slice(0,3)}</span>
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#555" }}>{entry.siteName}</span>
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#C8A96E" }}>{entry.client}</span>
-                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#1a1a1a", textAlign: "right" }}>{(entry.hours || 0)}h</span>
-                </div>
-                {entry.tasks?.length > 0 && (
-                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap", paddingLeft: 88, marginBottom: 4 }}>
-                    {entry.tasks.map(t => (
-                      <span key={t.id} style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, padding: "2px 7px", background: "#f0ece6", borderRadius: 10, color: "#666" }}>{t.label}</span>
-                    ))}
+              {group.records.map(record => (
+                editingId === record.id ? (
+                  <div key={record.id} style={{ padding: 10, background: "#faf6ef" }}>
+                    <EditSubmission
+                      record={record}
+                      sites={sites}
+                      tasks={tasks}
+                      onSave={async (updated) => { await onUpdateRecord(record.id, updated); setEditingId(null); }}
+                      onCancel={() => setEditingId(null)}
+                    />
                   </div>
-                )}
-                {entry.expenses?.length > 0 && (
-                  <div style={{ paddingLeft: 88 }}>
-                    {entry.expenses.map((exp, ei) => (
-                      <div key={ei} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888" }}>💰 {exp.description} — <strong>£{(exp.amount || 0).toFixed(2)}</strong></span>
-                        {exp.receipt && (
-                          <img src={exp.receipt} alt="" style={{ width: 28, height: 28, objectFit: "cover", borderRadius: 4, border: "1px solid #e0dbd4", cursor: "pointer" }}
-                            onClick={() => window.open(exp.receipt, "_blank")} />
+                ) : (
+                  <div key={record.id}>
+                    {confirmDeleteId === record.id && (
+                      <div style={{ padding: "12px 14px", background: "#fff5f5", borderBottom: "1px solid #f5c6cb", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#c0392b" }}>Delete {record.entries.length === 1 ? "this day" : "these " + record.entries.length + " days"}? Can't be undone.</span>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button onClick={() => setConfirmDeleteId(null)} style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, background: "none", border: "1px solid #ddd", borderRadius: 6, padding: "5px 12px", cursor: "pointer", color: "#888" }}>Cancel</button>
+                          <button onClick={async () => { await onDeleteRecord(record.id); setConfirmDeleteId(null); }} style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, background: "#c0392b", border: "none", borderRadius: 6, padding: "5px 12px", cursor: "pointer", color: "#fff" }}>Yes, delete</button>
+                        </div>
+                      </div>
+                    )}
+                    {record.entries.map((entry, i) => (
+                      <div key={i} style={{ padding: "10px 14px", borderBottom: "1px solid #f5f2ed", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: "grid", gridTemplateColumns: "56px 1fr 1fr 46px", gap: 8, marginBottom: (entry.tasks?.length || entry.expenses?.length) ? 6 : 0 }}>
+                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#aaa" }}>{entry.day?.slice(0,3)}</span>
+                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#555" }}>{entry.siteName}</span>
+                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#C8A96E" }}>{entry.client}</span>
+                            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#1a1a1a", textAlign: "right" }}>{(entry.hours || 0)}h</span>
+                          </div>
+                          {entry.tasks?.length > 0 && (
+                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", paddingLeft: 64, marginBottom: 4 }}>
+                              {entry.tasks.map(t => (
+                                <span key={t.id} style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, padding: "2px 7px", background: "#f0ece6", borderRadius: 10, color: "#666" }}>{t.label}</span>
+                              ))}
+                            </div>
+                          )}
+                          {entry.expenses?.length > 0 && (
+                            <div style={{ paddingLeft: 64 }}>
+                              {entry.expenses.map((exp, ei) => (
+                                <div key={ei} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888" }}>💰 {exp.description} — <strong>£{(exp.amount || 0).toFixed(2)}</strong></span>
+                                  {exp.receipt && (
+                                    receiptIsPdf(exp.receipt)
+                                      ? <span onClick={() => openReceipt(exp.receipt)} style={{ fontFamily: "'DM Mono', monospace", fontSize: 9, color: "#888", border: "1px solid #e0dbd4", borderRadius: 4, padding: "3px 6px", cursor: "pointer" }}>📄</span>
+                                      : <img src={receiptSrc(exp.receipt)} alt="" style={{ width: 28, height: 28, objectFit: "cover", borderRadius: 4, border: "1px solid #e0dbd4", cursor: "pointer" }}
+                                          onClick={() => openReceipt(exp.receipt)} />
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        {/* Edit/Delete act on the whole submission; show them once per submission, on its first day row */}
+                        {i === 0 && !locked && (
+                          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                            <button onClick={() => setEditingId(record.id)} style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, background: "none", border: "1px solid #e0dbd4", borderRadius: 6, padding: "3px 8px", cursor: "pointer", color: "#888" }}>Edit</button>
+                            <button onClick={() => setConfirmDeleteId(record.id)} style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, background: "none", border: "1px solid #f5c6cb", borderRadius: 6, padding: "3px 8px", cursor: "pointer", color: "#c0392b" }}>Del</button>
+                          </div>
                         )}
                       </div>
                     ))}
                   </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )
-      ))}
+                )
+              ))}
+            </div>
+          );
+        });
+      })()}
     </div>
   );
 }
