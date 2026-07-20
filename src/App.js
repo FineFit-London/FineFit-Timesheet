@@ -49,6 +49,15 @@ function weekEndLabel(weekKey) {
   end.setDate(end.getDate() + 13);
   return end.toLocaleDateString("en-GB");
 }
+// Short label for a fortnight, e.g. "6 Jul – 19 Jul"
+function periodLabelShort(weekKey) {
+  if (!weekKey || weekKey === "all") return "";
+  const start = new Date(weekKey + "T00:00:00");
+  const end = new Date(start);
+  end.setDate(end.getDate() + 13);
+  const f = (d) => d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  return `${f(start)} – ${f(end)}`;
+}
 
 // ---------- UK BANK HOLIDAYS (England & Wales) ----------
 // Baked-in fallback list so overtime is always correct even without internet.
@@ -994,7 +1003,7 @@ function AdminLogin({ onLogin }) {
 }
 
 // ---------- ADMIN DASHBOARD ----------
-function AdminDashboard({ allEntries, sites, rates, lockedWeeks, fittersList, pins, noIndigo, onSitesChange, onRatesChange, onDeleteRecord, onUpdateRecord, onToggleLock, onFittersChange, onResetPin, onToggleIndigo, onLogout }) {
+function AdminDashboard({ allEntries, sites, rates, lockedWeeks, fittersList, pins, noIndigo, billedJobs, onToggleBilledJob, extraDays, onToggleExtraDay, onSitesChange, onRatesChange, onDeleteRecord, onUpdateRecord, onToggleLock, onFittersChange, onResetPin, onToggleIndigo, onLogout }) {
   const [tab, setTab] = useState("submissions");
   return (
     <div>
@@ -1013,8 +1022,8 @@ function AdminDashboard({ allEntries, sites, rates, lockedWeeks, fittersList, pi
         ))}
       </div>
       {tab === "submissions" && <SubmissionsTab allEntries={allEntries} sites={sites} lockedWeeks={lockedWeeks} fittersList={fittersList} onDeleteRecord={onDeleteRecord} onUpdateRecord={onUpdateRecord} />}
-      {tab === "report" && <InvoicesTab allEntries={allEntries} rates={rates} sites={sites} lockedWeeks={lockedWeeks} noIndigo={noIndigo} onToggleLock={onToggleLock} />}
-      {tab === "earnings" && <EarningsTab allEntries={allEntries} rates={rates} sites={sites} noIndigo={noIndigo} />}
+      {tab === "report" && <InvoicesTab allEntries={allEntries} rates={rates} sites={sites} lockedWeeks={lockedWeeks} noIndigo={noIndigo} billedJobs={billedJobs} onToggleBilledJob={onToggleBilledJob} extraDays={extraDays} onToggleExtraDay={onToggleExtraDay} onToggleLock={onToggleLock} />}
+      {tab === "earnings" && <EarningsTab allEntries={allEntries} rates={rates} sites={sites} noIndigo={noIndigo} billedJobs={billedJobs} extraDays={extraDays} />}
       {tab === "rates" && <RatesTab allEntries={allEntries} rates={rates} fittersList={fittersList} sites={sites} onRatesChange={onRatesChange} />}
       {tab === "fitters" && <FittersTab fittersList={fittersList} allEntries={allEntries} pins={pins} noIndigo={noIndigo} onFittersChange={onFittersChange} onResetPin={onResetPin} onToggleIndigo={onToggleIndigo} />}
       {tab === "sites" && <SitesTab sites={sites} onSitesChange={onSitesChange} />}
@@ -1254,12 +1263,17 @@ function RatesTab({ allEntries, rates, fittersList, sites, onRatesChange }) {
                   {former && <span style={{ fontSize: 9, color: "#b7860b", background: "#fff8e8", borderRadius: 4, padding: "1px 5px", marginLeft: 6 }}>former</span>}
                 </span>
                 <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888" }}>{site}</span>
-                <div style={{ position: "relative" }}>
-                  <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#aaa" }}>£</span>
-                  <input value={getClientRate(fitter, site)} onChange={e => setEdit(fitter, site, "client", e.target.value)}
-                    type="number" min="0" step="0.5" placeholder="0.00"
-                    style={{ ...inputStyle, paddingLeft: 20, fontSize: 12 }} />
-                </div>
+                {(sites || []).find(s => s.name === site)?.pricing === "fixed" ? (
+                  <span title="This job is billed at a fixed price, so there's no hourly client rate."
+                    style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "#1a6f4b", background: "#eaf6f0", borderRadius: 5, padding: "5px 6px", textAlign: "center" }}>Fixed price</span>
+                ) : (
+                  <div style={{ position: "relative" }}>
+                    <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#aaa" }}>£</span>
+                    <input value={getClientRate(fitter, site)} onChange={e => setEdit(fitter, site, "client", e.target.value)}
+                      type="number" min="0" step="0.5" placeholder="0.00"
+                      style={{ ...inputStyle, paddingLeft: 20, fontSize: 12 }} />
+                  </div>
+                )}
                 <div style={{ position: "relative" }}>
                   <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#aaa" }}>£</span>
                   <input value={getFitterRate(fitter, site)} onChange={e => setEdit(fitter, site, "fitter", e.target.value)}
@@ -1288,10 +1302,12 @@ function RatesTab({ allEntries, rates, fittersList, sites, onRatesChange }) {
 }
 
 // ---------- EARNINGS TAB ----------
-function EarningsTab({ allEntries, rates, sites, noIndigo }) {
+function EarningsTab({ allEntries, rates, sites, noIndigo, billedJobs, extraDays }) {
   const [view, setView] = useState("period"); // "period" | "client" | "fitter"
 
   const siteMult = (siteName) => { const s = (sites || []).find(x => x.name === siteName); return s?.otMultiplier ?? 1.5; };
+  const siteByName = (name) => (sites || []).find(x => x.name === name);
+  const isFixedSite = (name) => siteByName(name)?.pricing === "fixed";
   const excluded = new Set(noIndigo || []);
 
   // Build one profit line per fitter+site+period from every submission
@@ -1302,7 +1318,11 @@ function EarningsTab({ allEntries, rates, sites, noIndigo }) {
       let nh = en.normalHours, oh = en.overtimeHours;
       if (nh === undefined || oh === undefined) { const s = splitOvertime(en.day, en.hours || 0, en.date); nh = s.normal; oh = s.overtime; }
       const rk = `${record.fitter}|||${en.siteName}`;
-      const cr = parseFloat(rates[rk]?.client) || 0;
+      const fixed = isFixedSite(en.siteName);
+      const dayKey = `${record.id}::${en.date}::${en.siteId}`;
+      const isExtra = fixed && !!(extraDays || {})[dayKey];
+      // Hourly job → charge hourly. Fixed job → charge only flagged extra days hourly (fixed price added separately).
+      const cr = (!fixed || isExtra) ? (parseFloat(rates[rk]?.client) || 0) : 0;
       const fr = parseFloat(rates[rk]?.fitter) || 0;
       const mult = siteMult(en.siteName);
       const charged = nh * cr + oh * cr * mult;
@@ -1311,6 +1331,16 @@ function EarningsTab({ allEntries, rates, sites, noIndigo }) {
       rows.push({ period, fitter: record.fitter, client: en.client, site: en.siteName, charged, paid, profit: charged - paid, hours: nh + oh });
     });
   });
+
+  // Fixed-price revenue lands in the period it was billed. Not attributable to a fitter.
+  const billed = billedJobs || {};
+  (sites || []).filter(s => s.pricing === "fixed").forEach(s => {
+    const period = billed[s.id];
+    if (!period) return; // not billed yet — no revenue counted
+    const price = s.jobPrice || 0;
+    rows.push({ period, fitter: "Fixed price job", client: s.client, site: s.name, charged: price, paid: 0, profit: price, hours: 0 });
+  });
+  const hasFixed = (sites || []).some(s => s.pricing === "fixed");
 
   const sum = (arr, key) => arr.reduce((a, r) => a + (r[key] || 0), 0);
   const totalCharged = sum(rows, "charged");
@@ -1356,6 +1386,11 @@ function EarningsTab({ allEntries, rates, sites, noIndigo }) {
       <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888", marginBottom: 16 }}>
         Your margin = what clients are charged minus what fitters are paid via Indigo. Expenses are pass-through and not counted. Estimates based on submitted hours and current rates.
       </p>
+      {hasFixed && (
+        <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#b7860b", background: "#fff8e8", border: "1px solid #f0e0b8", borderRadius: 8, padding: "9px 12px", marginTop: -6, marginBottom: 16 }}>
+          Fixed-price jobs: the job price counts in the fortnight you billed it, while the fitters&apos; hours cost you every fortnight they work. So a single period can look unusually high or low — the all-time figure is the true picture. Fixed-price revenue isn&apos;t tied to a fitter, so it appears as &ldquo;Fixed price job&rdquo; in the By fitter view.
+        </p>
+      )}
 
       {/* Headline cards */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
@@ -1409,7 +1444,7 @@ function EarningsTab({ allEntries, rates, sites, noIndigo }) {
 }
 
 // ---------- INVOICES TAB ----------
-function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggleLock }) {
+function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, billedJobs, onToggleBilledJob, extraDays, onToggleExtraDay, onToggleLock }) {
   const weeks = [...new Set(allEntries.map(e => e.weekKey))].sort().reverse();
   const clients = [...new Set(allEntries.flatMap(e => e.entries.map(en => en.client)).filter(Boolean))].sort();
   const [filterWeek, setFilterWeek] = useState(weeks[0] || "all");
@@ -1447,21 +1482,65 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggle
     });
   });
 
+  const siteByName = (name) => (sites || []).find(x => x.name === name);
+  const isFixedSite = (name) => siteByName(name)?.pricing === "fixed";
+
   const lines = Object.values(fitterSiteTotals).map(({ fitter, site, client, normalHours, overtimeHours, expenses }) => {
     const rateKey = `${fitter}|||${site}`;
-    const clientRate = parseFloat(rates[rateKey]?.client) || 0;
+    const fixed = isFixedSite(site);
+    // On fixed-price jobs the client isn't charged per hour — but fitters are still paid hourly.
+    const clientRate = fixed ? 0 : (parseFloat(rates[rateKey]?.client) || 0);
     const fitterRate = parseFloat(rates[rateKey]?.fitter) || 0;
     const mult = siteMult(site);
     const otClientRate = clientRate * mult;
     const otFitterRate = fitterRate * mult;
     const hours = normalHours + overtimeHours;
     const expTotal = expenses.reduce((a, e) => a + (e.amount || 0), 0);
-    const clientCost = normalHours * clientRate + overtimeHours * otClientRate;
+    const clientCost = fixed ? 0 : (normalHours * clientRate + overtimeHours * otClientRate);
     const fitterCost = normalHours * fitterRate + overtimeHours * otFitterRate;
-    return { fitter, site, client, hours, normalHours, overtimeHours, mult, clientRate, fitterRate, otClientRate, otFitterRate, clientCost, fitterCost, expTotal, expenses };
+    return { fitter, site, client, hours, normalHours, overtimeHours, mult, clientRate, fitterRate, otClientRate, otFitterRate, clientCost, fitterCost, expTotal, expenses, fixed };
   });
 
-  const clientTotal = lines.reduce((a, l) => a + l.clientCost, 0);
+  // Hourly lines only appear on the client invoice; fixed-price jobs are billed as one line.
+  const hourlyLines = lines.filter(l => !l.fixed);
+
+  // Fixed-price jobs relevant to this invoice: this client's fixed sites that either have
+  // work logged in this period, or were already marked as billed in this period.
+  const fixedJobs = (sites || [])
+    .filter(s => s.pricing === "fixed")
+    .filter(s => filterClient === "all" || s.client === filterClient)
+    .map(s => {
+      const workedThisPeriod = allEntries.some(r => r.weekKey === filterWeek && r.entries.some(en => en.siteId === s.id));
+      const billedIn = (billedJobs || {})[s.id] || null;
+      return { site: s, workedThisPeriod, billedIn, billedHere: billedIn === filterWeek };
+    })
+    .filter(j => j.workedThisPeriod || j.billedHere);
+
+  const billedFixedTotal = fixedJobs.filter(j => j.billedHere).reduce((a, j) => a + (j.site.jobPrice || 0), 0);
+
+  // EXTRAS on fixed-price jobs: individual days Tom flags as chargeable (variations/extra works).
+  // These are billed hourly ON TOP of the fixed price, and appear on the client timesheet.
+  const dayKeyOf = (recordId, en) => `${recordId}::${en.date}::${en.siteId}`;
+  const extraLines = [];
+  filtered.forEach(record => {
+    const entries = filterClient === "all" ? record.entries : record.entries.filter(en => en.client === filterClient);
+    entries.forEach(en => {
+      if (!isFixedSite(en.siteName)) return;              // only fixed jobs have "extras"
+      if (!(extraDays || {})[dayKeyOf(record.id, en)]) return; // only days Tom flagged
+      let nh = en.normalHours, oh = en.overtimeHours;
+      if (nh === undefined || oh === undefined) { const s = splitOvertime(en.day, en.hours || 0, en.date); nh = s.normal; oh = s.overtime; }
+      const rateKey = `${record.fitter}|||${en.siteName}`;
+      const cr = parseFloat(rates[rateKey]?.client) || 0;
+      const mult = siteMult(en.siteName);
+      const cost = nh * cr + oh * cr * mult;
+      extraLines.push({ fitter: record.fitter, site: en.siteName, client: en.client, date: en.date, day: en.day,
+        normalHours: nh, overtimeHours: oh, mult, clientRate: cr, otClientRate: cr * mult, cost,
+        areas: entryAreas(en) });
+    });
+  });
+  const extrasTotal = extraLines.reduce((a, l) => a + l.cost, 0);
+
+  const clientTotal = hourlyLines.reduce((a, l) => a + l.clientCost, 0) + billedFixedTotal + extrasTotal;
   const allExpenses = lines.flatMap(l => l.expenses);
   const totalExpenses = allExpenses.reduce((a, e) => a + (e.amount || 0), 0);
   const clientGrandTotal = clientTotal + totalExpenses;
@@ -1522,7 +1601,7 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggle
   };
 
   const printClientInvoice = () => {
-    const rows = lines.map(l => {
+    const rows = hourlyLines.map(l => {
       const normalRow = l.normalHours > 0 ? `
       <tr>
         <td>${l.fitter}</td><td>${l.site}</td>
@@ -1538,6 +1617,25 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggle
         <td style="text-align:right"><strong>£${(l.overtimeHours * l.otClientRate).toFixed(2)}</strong></td>
       </tr>` : "";
       return normalRow + otRow;
+    }).join("");
+    // Fixed-price jobs billed on this invoice: one line each, no hours shown
+    const fixedRows = fixedJobs.filter(j => j.billedHere).map(j => `
+      <tr>
+        <td>&mdash;</td><td>${j.site.name} <span style="color:#888">(fixed price for the job)</span></td>
+        <td style="text-align:right">1</td>
+        <td style="text-align:right">£${(j.site.jobPrice || 0).toFixed(2)}</td>
+        <td style="text-align:right"><strong>£${(j.site.jobPrice || 0).toFixed(2)}</strong></td>
+      </tr>`).join("");
+    // Extra / variation days on fixed jobs, billed hourly on top
+    const extraRows = extraLines.map(l => {
+      const label = `${l.site} <span style="color:#888">(extra work \u2014 ${l.day} ${l.date}${l.overtimeHours > 0 ? `, incl. OT ${l.mult}\u00D7` : ""})</span>`;
+      const hrs = (l.normalHours + l.overtimeHours).toFixed(2);
+      return `<tr>
+        <td>${l.fitter}</td><td>${label}</td>
+        <td style="text-align:right">${hrs}</td>
+        <td style="text-align:right">£${l.clientRate.toFixed(2)}</td>
+        <td style="text-align:right"><strong>£${l.cost.toFixed(2)}</strong></td>
+      </tr>`;
     }).join("");
     const expRows = allExpenses.length > 0 ? `
       <tr><td colspan="4" style="padding-top:8px;color:#888;font-size:12px;">Materials &amp; Expenses</td><td style="text-align:right"><strong>£${totalExpenses.toFixed(2)}</strong></td></tr>` : "";
@@ -1566,7 +1664,7 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggle
     </div>
     <table>
       <thead><tr><th>Fitter</th><th>Job</th><th>Hours</th><th>Rate £/hr</th><th>Cost</th></tr></thead>
-      <tbody>${rows}${expRows}
+      <tbody>${rows}${extraRows}${fixedRows}${expRows}
         <tr style="background:#f5f5f5"><td colspan="4" style="padding:10px;font-weight:bold">Subtotal</td><td style="padding:10px;text-align:right;font-weight:bold">£${clientGrandTotal.toFixed(2)}</td></tr>
         <tr><td colspan="4" style="padding:6px 10px;font-size:11px;color:#888">Domestic Reverse Charge @ 20%</td><td style="padding:6px 10px;text-align:right;color:#888">0.00</td></tr>
         <tr style="background:#1a1a1a;color:white"><td colspan="4" style="padding:10px;font-weight:bold">Invoice Total</td><td style="padding:10px;text-align:right;font-weight:bold;font-size:16px">£${clientGrandTotal.toFixed(2)}</td></tr>
@@ -1645,12 +1743,14 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggle
   const downloadXeroCSV = () => {
     const headers = ["ContactName","InvoiceNumber","InvoiceDate","DueDate","Description","Quantity","UnitAmount","AccountCode","TaxType","Currency"];
     const rows = [
-      ...lines.flatMap(l => {
+      ...hourlyLines.flatMap(l => {
         const out = [];
         if (l.normalHours > 0) out.push([contactName, invoiceNum, invoiceDate, dueDate, `${l.fitter} - ${l.site}`, l.normalHours.toFixed(2), l.clientRate.toFixed(2), "200", "RRSINPUT", "GBP"]);
         if (l.overtimeHours > 0) out.push([contactName, invoiceNum, invoiceDate, dueDate, `${l.fitter} - ${l.site} (overtime ${l.mult}x)`, l.overtimeHours.toFixed(2), l.otClientRate.toFixed(2), "200", "RRSINPUT", "GBP"]);
         return out;
       }),
+      ...fixedJobs.filter(j => j.billedHere).map(j => [contactName, invoiceNum, invoiceDate, dueDate, `${j.site.name} - fixed price for the job`, "1", (j.site.jobPrice || 0).toFixed(2), "200", "RRSINPUT", "GBP"]),
+      ...extraLines.map(l => [contactName, invoiceNum, invoiceDate, dueDate, `${l.fitter} - ${l.site} extra work ${l.date}`, (l.normalHours + l.overtimeHours).toFixed(2), l.clientRate.toFixed(2), "200", "RRSINPUT", "GBP"]),
       ...(totalExpenses > 0 ? [[contactName, invoiceNum, invoiceDate, dueDate, "Materials and Expenses", "1", totalExpenses.toFixed(2), "200", "RRSINPUT", "GBP"]] : [])
     ];
     const csv = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -1665,13 +1765,18 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggle
     if (filterWeek === "all") { alert("Please pick a specific fortnight above first."); return; }
     const periodDays = getPeriodDays(filterWeek); // 14 days, each { iso, dayName, label, week }
 
+    // A day appears on the client timesheet if it's an hourly-site day,
+    // OR a fixed-site day Tom has flagged as a chargeable extra.
+    const dayKeyOf = (recordId, en) => `${recordId}::${en.date}::${en.siteId}`;
+    const showsOnTimesheet = (r, en) => !isFixedSite(en.siteName) || !!(extraDays || {})[dayKeyOf(r.id, en)];
+
     // Which clients to include
     const clientsInPeriod = [...new Set(
       allEntries.filter(r => r.weekKey === filterWeek)
-        .flatMap(r => r.entries.map(en => en.client)).filter(Boolean)
+        .flatMap(r => r.entries.filter(en => showsOnTimesheet(r, en)).map(en => en.client)).filter(Boolean)
     )].sort();
-    const targetClients = filterClient === "all" ? clientsInPeriod : [filterClient];
-    if (targetClients.length === 0) { alert("No work found for this period."); return; }
+    const targetClients = (filterClient === "all" ? clientsInPeriod : [filterClient]).filter(c => clientsInPeriod.includes(c));
+    if (targetClients.length === 0) { alert("No chargeable work found for this period. (Fixed-price hours only show here once you mark them as extras on the invoice.)"); return; }
 
     const dayAbbr = { Monday: "MON", Tuesday: "TUE", Wednesday: "WED", Thursday: "THUR", Friday: "FRI", Saturday: "SAT", Sunday: "SUN" };
     const fmt = (iso) => new Date(iso + "T00:00:00").toLocaleDateString("en-GB");
@@ -1686,9 +1791,10 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggle
         const rows = [];
         allEntries.filter(r => r.weekKey === filterWeek).forEach(r => {
           r.entries.forEach(en => {
-            if (en.client === client && en.date === d.iso) {
+            if (en.client === client && en.date === d.iso && showsOnTimesheet(r, en)) {
               const hrs = en.hours || 0; weekTotal += hrs;
-              const desc = entryAreas(en).join(", ");
+              const extra = isFixedSite(en.siteName);
+              const desc = entryAreas(en).join(", ") + (extra ? " (extra work)" : "");
               rows.push(`<tr>
                 <td class="dcell"></td>
                 <td>${r.fitter}</td>
@@ -1821,7 +1927,7 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggle
                   </tr>
                 </thead>
                 <tbody>
-                  {lines.flatMap((l, i) => {
+                  {hourlyLines.flatMap((l, i) => {
                     const rowsOut = [];
                     if (l.normalHours > 0) rowsOut.push(
                       <tr key={`${i}-n`} style={{ borderBottom: "1px solid #f5f2ed" }}>
@@ -1843,6 +1949,24 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggle
                     );
                     return rowsOut;
                   })}
+                  {fixedJobs.filter(j => j.billedHere).map(j => (
+                    <tr key={`fx-${j.site.id}`} style={{ borderBottom: "1px solid #f5f2ed", background: "#f2faf6" }}>
+                      <td style={tdStyle}>—</td>
+                      <td style={{ ...tdStyle, color: "#1a6f4b" }}>{j.site.name} · fixed price</td>
+                      <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace" }}>1</td>
+                      <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace" }}>{toGBP(j.site.jobPrice || 0)}</td>
+                      <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace", fontWeight: 600 }}>{toGBP(j.site.jobPrice || 0)}</td>
+                    </tr>
+                  ))}
+                  {extraLines.map((l, xi) => (
+                    <tr key={`ex-${xi}`} style={{ borderBottom: "1px solid #f5f2ed", background: "#fff6f0" }}>
+                      <td style={tdStyle}>{l.fitter}</td>
+                      <td style={{ ...tdStyle, color: "#b5561f" }}>{l.site} · extra ({l.day?.slice(0,3)} {l.date})</td>
+                      <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace" }}>{(l.normalHours + l.overtimeHours).toFixed(2)}</td>
+                      <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace" }}>{l.clientRate > 0 ? `£${l.clientRate.toFixed(2)}` : <span style={{ color: "#f39c12" }}>Set rate</span>}</td>
+                      <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace", fontWeight: 600 }}>{toGBP(l.cost)}</td>
+                    </tr>
+                  ))}
                   {totalExpenses > 0 && (
                     <tr style={{ borderBottom: "1px solid #f5f2ed", background: "#fafaf8" }}>
                       <td style={{ ...tdStyle, color: "#888", fontStyle: "italic" }} colSpan={2}>Materials &amp; Expenses</td>
@@ -1954,6 +2078,60 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, onToggle
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Fixed-price jobs — Tom ticks to bill the job price on this invoice (once only) */}
+          {fixedJobs.length > 0 && filterWeek !== "all" && (
+            <div style={{ border: "1px solid #cfe6da", background: "#f2faf6", borderRadius: 10, padding: 14, marginBottom: 12 }}>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#1a6f4b", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Fixed-price jobs</div>
+              {fixedJobs.map(j => {
+                const billedElsewhere = j.billedIn && j.billedIn !== filterWeek;
+                // Days worked on this fixed job in this period (for flagging extras)
+                const jobDays = [];
+                filtered.forEach(r => r.entries.forEach(en => {
+                  if (en.siteId === j.site.id) jobDays.push({ recordId: r.id, key: `${r.id}::${en.date}::${en.siteId}`, fitter: r.fitter, date: en.date, day: en.day, hours: en.hours || 0, areas: entryAreas(en) });
+                }));
+                jobDays.sort((a, b) => (a.date || "").localeCompare(b.date || "") || a.fitter.localeCompare(b.fitter));
+                return (
+                  <div key={j.site.id} style={{ padding: "7px 0", borderBottom: "1px solid #e3f0e9" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 9, cursor: billedElsewhere ? "not-allowed" : "pointer", opacity: billedElsewhere ? 0.55 : 1 }}>
+                        <input type="checkbox" checked={!!j.billedHere} disabled={billedElsewhere}
+                          onChange={() => onToggleBilledJob(j.site.id, filterWeek)}
+                          style={{ width: 17, height: 17, accentColor: "#1a6f4b", cursor: billedElsewhere ? "not-allowed" : "pointer" }} />
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#1a1a1a" }}>
+                          {j.site.name} <span style={{ color: "#1a6f4b", fontWeight: 700 }}>{toGBP(j.site.jobPrice || 0)}</span>
+                        </span>
+                      </label>
+                      <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: billedElsewhere ? "#b7860b" : "#888", textAlign: "right" }}>
+                        {billedElsewhere ? `Already billed ${periodLabelShort(j.billedIn)}` : j.billedHere ? "Price on this invoice" : "Price not billed yet"}
+                      </span>
+                    </div>
+                    {/* Flag individual days as chargeable extras (billed hourly on top) */}
+                    {jobDays.length > 0 && (
+                      <div style={{ marginLeft: 26, marginTop: 6 }}>
+                        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "#7a8f85", marginBottom: 4 }}>Tick any days that were extras / variations (billed hourly on top):</div>
+                        {jobDays.map(d => {
+                          const on = !!(extraDays || {})[d.key];
+                          return (
+                            <label key={d.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", cursor: "pointer" }}>
+                              <input type="checkbox" checked={on} onChange={() => onToggleExtraDay(d.key)}
+                                style={{ width: 15, height: 15, accentColor: "#b5561f", cursor: "pointer" }} />
+                              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: on ? "#b5561f" : "#888" }}>
+                                {d.day?.slice(0,3)} {d.date} · {d.fitter} · {d.hours}h{d.areas.length ? ` · ${d.areas.join(", ")}` : ""}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "#7a8f85", margin: "8px 0 0 0" }}>
+                Tick a job to bill its fixed price on this invoice. Fitters&apos; hours are always paid via Indigo. Days you don&apos;t mark as extras stay inside the fixed price and aren&apos;t charged again or shown to the client.
+              </p>
             </div>
           )}
 
@@ -2350,23 +2528,51 @@ function SitesTab({ sites, onSitesChange }) {
   const [siteName, setSiteName] = useState("");
   const [client, setClient] = useState("");
   const [otMult, setOtMult] = useState("1.5");
+  const [pricing, setPricing] = useState("hourly");
+  const [jobPrice, setJobPrice] = useState("");
   const [error, setError] = useState("");
   const addSite = async () => {
     if (!siteName.trim()) { setError("Enter a site name."); return; }
     if (!client.trim()) { setError("Enter a client name."); return; }
     const m = parseFloat(otMult);
     if (isNaN(m) || m < 1) { setError("Overtime multiplier must be 1 or higher (e.g. 1.25 or 1.5)."); return; }
-    await onSitesChange([...sites, { id: Date.now().toString(), name: siteName.trim(), client: client.trim(), otMultiplier: m }]);
-    setSiteName(""); setClient(""); setOtMult("1.5"); setError("");
+    const p = parseFloat(jobPrice);
+    if (pricing === "fixed" && (isNaN(p) || p <= 0)) { setError("Enter the fixed price for this job."); return; }
+    await onSitesChange([...sites, {
+      id: Date.now().toString(), name: siteName.trim(), client: client.trim(), otMultiplier: m,
+      pricing, jobPrice: pricing === "fixed" ? p : null,
+    }]);
+    setSiteName(""); setClient(""); setOtMult("1.5"); setPricing("hourly"); setJobPrice(""); setError("");
   };
   return (
     <div>
-      <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888", marginBottom: 20 }}>Add sites, link them to a client, and set the overtime rate for that job.</p>
+      <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888", marginBottom: 20 }}>Add sites, link them to a client, choose how the job is priced, and set the overtime rate.</p>
       <div style={{ background: "#f5f2ed", borderRadius: 10, padding: 16, marginBottom: 20 }}>
         <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 12 }}>Add Site</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
           <div><label style={labelStyle}>Site Name</label><input value={siteName} onChange={e => { setSiteName(e.target.value); setError(""); }} placeholder="e.g. Chelsea Barracks" style={inputStyle} /></div>
           <div><label style={labelStyle}>Client</label><input value={client} onChange={e => { setClient(e.target.value); setError(""); }} placeholder="e.g. Lanserring" style={inputStyle} /></div>
+        </div>
+        <div style={{ marginBottom: 10 }}>
+          <label style={labelStyle}>How is this job priced?</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <select value={pricing} onChange={e => { setPricing(e.target.value); setError(""); }} style={{ ...selectStyle, width: 170 }}>
+              <option value="hourly">Hourly (charge per hour)</option>
+              <option value="fixed">Fixed price for the job</option>
+            </select>
+            {pricing === "fixed" && (
+              <div style={{ position: "relative" }}>
+                <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#aaa" }}>£</span>
+                <input value={jobPrice} onChange={e => { setJobPrice(e.target.value); setError(""); }} type="number" min="0" step="50" placeholder="0.00"
+                  style={{ ...inputStyle, width: 140, paddingLeft: 22, marginBottom: 0 }} />
+              </div>
+            )}
+          </div>
+          <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#aaa" }}>
+            {pricing === "fixed"
+              ? "Client is billed this price once. Fitters still log hours and are paid hourly as normal."
+              : "Client is charged for the hours logged, at the rates you set."}
+          </span>
         </div>
         <div style={{ marginBottom: 10 }}>
           <label style={labelStyle}>Overtime multiplier</label>
@@ -2393,6 +2599,9 @@ function SitesTab({ sites, onSitesChange }) {
                 <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: "#1a1a1a" }}>{s.name}</span>
                 <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#C8A96E", marginLeft: 10 }}>→ {s.client}</span>
                 <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888", marginLeft: 10 }}>OT {s.otMultiplier ?? 1.5}×</span>
+                {s.pricing === "fixed"
+                  ? <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "#1a6f4b", background: "#eaf6f0", borderRadius: 5, padding: "2px 7px", marginLeft: 10 }}>Fixed {toGBP(s.jobPrice || 0)}</span>
+                  : <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "#888", background: "#f2efeb", borderRadius: 5, padding: "2px 7px", marginLeft: 10 }}>Hourly</span>}
               </div>
               <button onClick={() => onSitesChange(sites.filter(x => x.id !== s.id))} style={{ background: "none", border: "1px solid #eee", borderRadius: 6, padding: "4px 10px", fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#aaa", cursor: "pointer" }}>Remove</button>
             </div>
@@ -2414,6 +2623,8 @@ export default function App() {
   const [fittersList, setFittersList] = useState([]);
   const [pins, setPins] = useState({});
   const [noIndigo, setNoIndigo] = useState([]); // fitters excluded from the Indigo payment sheet
+  const [billedJobs, setBilledJobs] = useState({}); // fixed-price jobs already billed: { siteId: weekKey }
+  const [extraDays, setExtraDays] = useState({}); // on fixed jobs, days Tom marks as chargeable extras: { dayKey: true }
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -2421,8 +2632,8 @@ export default function App() {
     Promise.all([
       load("finefit_entries"), loadStr("finefit_fitter_name"),
       load("finefit_sites"), load("finefit_tasks"), load("finefit_rates"),
-      load("finefit_locked_weeks"), load("finefit_fitters"), load("finefit_pins"), load("finefit_no_indigo"),
-    ]).then(([entries, name, savedSites, _savedTasks, savedRates, savedLocks, savedFitters, savedPins, savedNoIndigo]) => {
+      load("finefit_locked_weeks"), load("finefit_fitters"), load("finefit_pins"), load("finefit_no_indigo"), load("finefit_billed_jobs"), load("finefit_extra_days"),
+    ]).then(([entries, name, savedSites, _savedTasks, savedRates, savedLocks, savedFitters, savedPins, savedNoIndigo, savedBilled, savedExtra]) => {
       setAllEntries(entries || []);
       if (name) setFitterName(name);
       setSites(savedSites || []);
@@ -2431,6 +2642,8 @@ export default function App() {
       setFittersList(savedFitters || []);
       setPins(savedPins || {});
       setNoIndigo(savedNoIndigo || []);
+      setBilledJobs(savedBilled || {});
+      setExtraDays(savedExtra || {});
       setLoading(false);
     });
   }, []);
@@ -2448,6 +2661,16 @@ export default function App() {
   const handleFittersChange = async (u) => { setFittersList(u); await save("finefit_fitters", u); };
   const handleSetPin = async (name, hash) => { const u = { ...pins, [name]: hash }; setPins(u); await save("finefit_pins", u); };
   const handleResetPin = async (name) => { const u = { ...pins }; delete u[name]; setPins(u); await save("finefit_pins", u); };
+  const handleToggleExtraDay = async (dayKey) => {
+    const u = { ...extraDays };
+    if (u[dayKey]) delete u[dayKey]; else u[dayKey] = true;
+    setExtraDays(u); await save("finefit_extra_days", u);
+  };
+  const handleToggleBilledJob = async (siteId, weekKey) => {
+    const u = { ...billedJobs };
+    if (u[siteId] === weekKey) delete u[siteId]; else u[siteId] = weekKey;
+    setBilledJobs(u); await save("finefit_billed_jobs", u);
+  };
   const handleToggleIndigo = async (name) => {
     const u = noIndigo.includes(name) ? noIndigo.filter(n => n !== name) : [...noIndigo, name];
     setNoIndigo(u); await save("finefit_no_indigo", u);
@@ -2477,7 +2700,7 @@ export default function App() {
             <AdminLogin onLogin={() => setView("admin")} />
           ) : (
             <AdminDashboard allEntries={allEntries} sites={sites} rates={rates}
-              lockedWeeks={lockedWeeks} fittersList={fittersList} pins={pins} noIndigo={noIndigo} onSitesChange={handleSitesChange}
+              lockedWeeks={lockedWeeks} fittersList={fittersList} pins={pins} noIndigo={noIndigo} billedJobs={billedJobs} onToggleBilledJob={handleToggleBilledJob} extraDays={extraDays} onToggleExtraDay={handleToggleExtraDay} onSitesChange={handleSitesChange}
               onRatesChange={handleRatesChange} onDeleteRecord={handleDeleteRecord} onFittersChange={handleFittersChange} onResetPin={handleResetPin} onToggleIndigo={handleToggleIndigo}
               onUpdateRecord={handleUpdateRecord} onToggleLock={handleToggleLock} onLogout={() => setView("fitter")} />
           )}
