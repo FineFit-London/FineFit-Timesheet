@@ -1021,7 +1021,7 @@ function AdminLogin({ onLogin }) {
 }
 
 // ---------- ADMIN DASHBOARD ----------
-function AdminDashboard({ allEntries, sites, rates, lockedWeeks, fittersList, pins, noIndigo, billedJobs, onToggleBilledJob, extraDays, onToggleExtraDay, onSitesChange, onRatesChange, onDeleteRecord, onUpdateRecord, onToggleLock, onFittersChange, onResetPin, onToggleIndigo, onLogout }) {
+function AdminDashboard({ allEntries, sites, rates, lockedWeeks, fittersList, pins, noIndigo, billedJobs, onToggleBilledJob, extraDays, onToggleExtraDay, companyExpenses, onCompanyExpensesChange, onSitesChange, onRatesChange, onDeleteRecord, onUpdateRecord, onToggleLock, onFittersChange, onResetPin, onToggleIndigo, onLogout }) {
   const [tab, setTab] = useState("submissions");
   return (
     <div>
@@ -1030,7 +1030,7 @@ function AdminDashboard({ allEntries, sites, rates, lockedWeeks, fittersList, pi
         <button onClick={onLogout} style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, background: "none", border: "1px solid #ddd", borderRadius: 6, padding: "6px 12px", cursor: "pointer", color: "#888" }}>Log out</button>
       </div>
       <div style={{ display: "flex", gap: 4, marginBottom: 24, background: "#f5f2ed", borderRadius: 8, padding: 4 }}>
-        {[["submissions", "Timesheets"], ["report", "Invoices"], ["earnings", "Earnings"], ["rates", "Rates"], ["fitters", "Fitters"], ["sites", "Sites"]].map(([key, label]) => (
+        {[["submissions", "Timesheets"], ["report", "Invoices"], ["expenses", "Expenses"], ["earnings", "Earnings"], ["rates", "Rates"], ["fitters", "Fitters"], ["sites", "Sites"]].map(([key, label]) => (
           <button key={key} onClick={() => setTab(key)} style={{
             flex: 1, fontFamily: "'DM Mono', monospace", fontSize: 11, padding: "8px 0",
             border: "none", borderRadius: 6, cursor: "pointer",
@@ -1040,7 +1040,8 @@ function AdminDashboard({ allEntries, sites, rates, lockedWeeks, fittersList, pi
         ))}
       </div>
       {tab === "submissions" && <SubmissionsTab allEntries={allEntries} sites={sites} lockedWeeks={lockedWeeks} fittersList={fittersList} onDeleteRecord={onDeleteRecord} onUpdateRecord={onUpdateRecord} />}
-      {tab === "report" && <InvoicesTab allEntries={allEntries} rates={rates} sites={sites} lockedWeeks={lockedWeeks} noIndigo={noIndigo} billedJobs={billedJobs} onToggleBilledJob={onToggleBilledJob} extraDays={extraDays} onToggleExtraDay={onToggleExtraDay} onToggleLock={onToggleLock} />}
+      {tab === "report" && <InvoicesTab allEntries={allEntries} rates={rates} sites={sites} lockedWeeks={lockedWeeks} noIndigo={noIndigo} billedJobs={billedJobs} onToggleBilledJob={onToggleBilledJob} extraDays={extraDays} onToggleExtraDay={onToggleExtraDay} companyExpenses={companyExpenses} onToggleLock={onToggleLock} />}
+      {tab === "expenses" && <ExpensesTab companyExpenses={companyExpenses} sites={sites} onCompanyExpensesChange={onCompanyExpensesChange} />}
       {tab === "earnings" && <EarningsTab allEntries={allEntries} rates={rates} sites={sites} noIndigo={noIndigo} billedJobs={billedJobs} extraDays={extraDays} />}
       {tab === "rates" && <RatesTab allEntries={allEntries} rates={rates} fittersList={fittersList} sites={sites} onRatesChange={onRatesChange} />}
       {tab === "fitters" && <FittersTab fittersList={fittersList} allEntries={allEntries} pins={pins} noIndigo={noIndigo} onFittersChange={onFittersChange} onResetPin={onResetPin} onToggleIndigo={onToggleIndigo} />}
@@ -1319,6 +1320,114 @@ function RatesTab({ allEntries, rates, fittersList, sites, onRatesChange }) {
   );
 }
 
+// ---------- EXPENSES TAB (Tom's own costs per client) ----------
+function ExpensesTab({ companyExpenses, sites, onCompanyExpensesChange }) {
+  const [client, setClient] = useState("");
+  const [date, setDate] = useState(dateKey(new Date()));
+  const [description, setDescription] = useState("");
+  const [amount, setAmount] = useState("");
+  const [error, setError] = useState("");
+
+  const clients = [...new Set((sites || []).map(s => s.client).filter(Boolean))].sort();
+
+  const addExpense = async () => {
+    if (!client) { setError("Pick which company this is for."); return; }
+    if (!description.trim()) { setError("Add a short description, e.g. Hotel \u2013 2 nights."); return; }
+    const amt = parseFloat(amount);
+    if (isNaN(amt) || amt <= 0) { setError("Enter a valid amount."); return; }
+    if (!date) { setError("Pick the date it was incurred."); return; }
+    await onCompanyExpensesChange([...(companyExpenses || []), {
+      id: Date.now().toString(), client, date, description: description.trim(), amount: amt,
+    }]);
+    setDescription(""); setAmount(""); setError("");
+  };
+
+  // Group for display, newest first
+  const sorted = [...(companyExpenses || [])].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const byClient = {};
+  sorted.forEach(e => { (byClient[e.client] = byClient[e.client] || []).push(e); });
+
+  return (
+    <div>
+      <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#888", marginBottom: 16 }}>
+        Your own costs for a company \u2014 hotels, flights, travel. They\u2019re added to that company\u2019s invoice for the fortnight the date falls in, together with any fitter receipts, as one expenses total.
+      </p>
+
+      <div style={{ background: "#f5f2ed", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#888", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 12 }}>Add Expense</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+          <div>
+            <label style={labelStyle}>Company</label>
+            <select value={client} onChange={e => { setClient(e.target.value); setError(""); }} style={selectStyle}>
+              <option value="">— Select company —</option>
+              {clients.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={labelStyle}>Date</label>
+            <input type="date" value={date} onChange={e => { setDate(e.target.value); setError(""); }} style={inputStyle} />
+          </div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
+          <div>
+            <label style={labelStyle}>Description</label>
+            <input value={description} onChange={e => { setDescription(e.target.value); setError(""); }}
+              onKeyDown={e => e.key === "Enter" && addExpense()}
+              placeholder="e.g. Hotel \u2013 2 nights, Flight to Glasgow" style={inputStyle} />
+          </div>
+          <div>
+            <label style={labelStyle}>Amount</label>
+            <div style={{ position: "relative" }}>
+              <span style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#aaa" }}>£</span>
+              <input value={amount} onChange={e => { setAmount(e.target.value); setError(""); }} type="number" min="0" step="0.01" placeholder="0.00"
+                style={{ ...inputStyle, paddingLeft: 22 }} />
+            </div>
+          </div>
+        </div>
+        {error && <p style={{ color: "#c0392b", fontFamily: "'DM Mono', monospace", fontSize: 12, margin: "8px 0 0 0" }}>{error}</p>}
+        <button onClick={addExpense} style={{ ...btnStyle, marginTop: 12, padding: "10px 18px" }}>+ Add Expense</button>
+        {clients.length === 0 && <p style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#b7860b", margin: "8px 0 0 0" }}>Add a site with a client in the Sites tab first.</p>}
+      </div>
+
+      {sorted.length === 0 ? (
+        <p style={{ textAlign: "center", fontFamily: "'DM Mono', monospace", fontSize: 13, color: "#bbb", padding: "24px 0" }}>No expenses added yet.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {Object.keys(byClient).sort().map(c => {
+            const list = byClient[c];
+            const total = list.reduce((a, e) => a + (e.amount || 0), 0);
+            return (
+              <div key={c}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#C8A96E" }}>{c}</span>
+                  <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#1a1a1a", fontWeight: 700 }}>{toGBP(total)}</span>
+                </div>
+                <div style={{ border: "1px solid #e8e4de", borderRadius: 8, overflow: "hidden" }}>
+                  {list.map(e => (
+                    <div key={e.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px", borderBottom: "1px solid #f5f2ed" }}>
+                      <div>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#1a1a1a" }}>{e.description}</span>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: "#aaa", marginLeft: 8 }}>
+                          {e.date} · invoice {periodLabelShort(dateKey(getPeriodStart(new Date(e.date + "T00:00:00"))))}
+                        </span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: "#1a1a1a" }}>{toGBP(e.amount || 0)}</span>
+                        <button onClick={() => onCompanyExpensesChange((companyExpenses || []).filter(x => x.id !== e.id))}
+                          style={{ background: "none", border: "1px solid #eee", borderRadius: 6, padding: "3px 9px", fontFamily: "'DM Mono', monospace", fontSize: 11, color: "#aaa", cursor: "pointer" }}>Remove</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- EARNINGS TAB ----------
 function EarningsTab({ allEntries, rates, sites, noIndigo, billedJobs, extraDays }) {
   const [view, setView] = useState("period"); // "period" | "client" | "fitter"
@@ -1462,7 +1571,7 @@ function EarningsTab({ allEntries, rates, sites, noIndigo, billedJobs, extraDays
 }
 
 // ---------- INVOICES TAB ----------
-function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, billedJobs, onToggleBilledJob, extraDays, onToggleExtraDay, onToggleLock }) {
+function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, billedJobs, onToggleBilledJob, extraDays, onToggleExtraDay, companyExpenses, onToggleLock }) {
   const weeks = [...new Set(allEntries.map(e => e.weekKey))].sort().reverse();
   const clients = [...new Set(allEntries.flatMap(e => e.entries.map(en => en.client)).filter(Boolean))].sort();
   const [filterWeek, setFilterWeek] = useState(weeks[0] || "all");
@@ -1570,7 +1679,16 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, billedJo
 
   const clientTotal = hourlyLines.reduce((a, l) => a + l.clientCost, 0) + billedFixedTotal + extrasTotal;
   const allExpenses = lines.flatMap(l => l.expenses);
-  const totalExpenses = allExpenses.reduce((a, e) => a + (e.amount || 0), 0);
+  const fitterExpensesTotal = allExpenses.reduce((a, e) => a + (e.amount || 0), 0);
+  // Tom's own costs for this company, landing in the fortnight their date falls in
+  const companyExpenseLines = (companyExpenses || []).filter(e => {
+    if (filterClient !== "all" && e.client !== filterClient) return false;
+    if (filterWeek === "all") return true;
+    if (!e.date) return false;
+    return dateKey(getPeriodStart(new Date(e.date + "T00:00:00"))) === filterWeek;
+  });
+  const companyExpensesTotal = companyExpenseLines.reduce((a, e) => a + (e.amount || 0), 0);
+  const totalExpenses = fitterExpensesTotal + companyExpensesTotal;
   const clientGrandTotal = clientTotal + totalExpenses;
 
   // Indigo pays only fitters not marked "not paid via Indigo" (e.g. Tom).
@@ -1665,7 +1783,7 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, billedJo
         <td style="text-align:right"><strong>£${l.cost.toFixed(2)}</strong></td>
       </tr>`;
     }).join("");
-    const expRows = allExpenses.length > 0 ? `
+    const expRows = totalExpenses > 0 ? `
       <tr><td colspan="4" style="padding-top:8px;color:#888;font-size:12px;">Materials &amp; Expenses</td><td style="text-align:right"><strong>£${totalExpenses.toFixed(2)}</strong></td></tr>` : "";
     const html = `<!DOCTYPE html><html><head><title>Invoice ${invoiceNum}</title>
     <style>body{font-family:Arial,sans-serif;margin:40px;color:#1a1a1a;font-size:13px;}
@@ -2029,9 +2147,18 @@ function InvoicesTab({ allEntries, rates, sites, lockedWeeks, noIndigo, billedJo
                       <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace", fontWeight: 600 }}>{toGBP(l.cost)}</td>
                     </tr>
                   ))}
+                  {companyExpenseLines.map(e => (
+                    <tr key={`ce-${e.id}`} style={{ borderBottom: "1px solid #f5f2ed", background: "#fafaf8" }}>
+                      <td style={tdStyle}>—</td>
+                      <td style={{ ...tdStyle, color: "#888" }}>{e.description} <span style={{ color: "#bbb" }}>· your expense {e.date}</span></td>
+                      <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace" }}>1.00</td>
+                      <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace" }}>{toGBP(e.amount || 0)}</td>
+                      <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace", fontWeight: 600 }}>{toGBP(e.amount || 0)}</td>
+                    </tr>
+                  ))}
                   {totalExpenses > 0 && (
                     <tr style={{ borderBottom: "1px solid #f5f2ed", background: "#fafaf8" }}>
-                      <td style={{ ...tdStyle, color: "#888", fontStyle: "italic" }} colSpan={2}>Materials &amp; Expenses</td>
+                      <td style={{ ...tdStyle, color: "#888", fontStyle: "italic" }} colSpan={2}>Materials &amp; Expenses (total)</td>
                       <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace" }}>1.00</td>
                       <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace" }}>{toGBP(totalExpenses)}</td>
                       <td style={{ ...tdStyle, textAlign: "right", fontFamily: "'DM Mono', monospace", fontWeight: 600 }}>{toGBP(totalExpenses)}</td>
@@ -2727,6 +2854,7 @@ export default function App() {
   const [noIndigo, setNoIndigo] = useState([]); // fitters excluded from the Indigo payment sheet
   const [billedJobs, setBilledJobs] = useState({}); // fixed-price jobs already billed: { siteId: weekKey }
   const [extraDays, setExtraDays] = useState({}); // on fixed jobs, days Tom marks as chargeable extras: { dayKey: true }
+  const [companyExpenses, setCompanyExpenses] = useState([]); // Tom's own costs per client (hotels, flights...)
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -2734,8 +2862,8 @@ export default function App() {
     Promise.all([
       load("finefit_entries"), loadStr("finefit_fitter_name"),
       load("finefit_sites"), load("finefit_tasks"), load("finefit_rates"),
-      load("finefit_locked_weeks"), load("finefit_fitters"), load("finefit_pins"), load("finefit_no_indigo"), load("finefit_billed_jobs"), load("finefit_extra_days"),
-    ]).then(([entries, name, savedSites, _savedTasks, savedRates, savedLocks, savedFitters, savedPins, savedNoIndigo, savedBilled, savedExtra]) => {
+      load("finefit_locked_weeks"), load("finefit_fitters"), load("finefit_pins"), load("finefit_no_indigo"), load("finefit_billed_jobs"), load("finefit_extra_days"), load("finefit_company_expenses"),
+    ]).then(([entries, name, savedSites, _savedTasks, savedRates, savedLocks, savedFitters, savedPins, savedNoIndigo, savedBilled, savedExtra, savedCoExp]) => {
       setAllEntries(entries || []);
       if (name) setFitterName(name);
       setSites(savedSites || []);
@@ -2746,6 +2874,7 @@ export default function App() {
       setNoIndigo(savedNoIndigo || []);
       setBilledJobs(savedBilled || {});
       setExtraDays(savedExtra || {});
+      setCompanyExpenses(savedCoExp || []);
       setLoading(false);
     });
   }, []);
@@ -2763,6 +2892,7 @@ export default function App() {
   const handleFittersChange = async (u) => { setFittersList(u); await save("finefit_fitters", u); };
   const handleSetPin = async (name, hash) => { const u = { ...pins, [name]: hash }; setPins(u); await save("finefit_pins", u); };
   const handleResetPin = async (name) => { const u = { ...pins }; delete u[name]; setPins(u); await save("finefit_pins", u); };
+  const handleCompanyExpensesChange = async (u) => { setCompanyExpenses(u); await save("finefit_company_expenses", u); };
   const handleToggleExtraDay = async (dayKey) => {
     const u = { ...extraDays };
     if (u[dayKey]) delete u[dayKey]; else u[dayKey] = true;
@@ -2802,7 +2932,7 @@ export default function App() {
             <AdminLogin onLogin={() => setView("admin")} />
           ) : (
             <AdminDashboard allEntries={allEntries} sites={sites} rates={rates}
-              lockedWeeks={lockedWeeks} fittersList={fittersList} pins={pins} noIndigo={noIndigo} billedJobs={billedJobs} onToggleBilledJob={handleToggleBilledJob} extraDays={extraDays} onToggleExtraDay={handleToggleExtraDay} onSitesChange={handleSitesChange}
+              lockedWeeks={lockedWeeks} fittersList={fittersList} pins={pins} noIndigo={noIndigo} billedJobs={billedJobs} onToggleBilledJob={handleToggleBilledJob} extraDays={extraDays} onToggleExtraDay={handleToggleExtraDay} companyExpenses={companyExpenses} onCompanyExpensesChange={handleCompanyExpensesChange} onSitesChange={handleSitesChange}
               onRatesChange={handleRatesChange} onDeleteRecord={handleDeleteRecord} onFittersChange={handleFittersChange} onResetPin={handleResetPin} onToggleIndigo={handleToggleIndigo}
               onUpdateRecord={handleUpdateRecord} onToggleLock={handleToggleLock} onLogout={() => setView("fitter")} />
           )}
